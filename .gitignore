@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+
+# Blender/Sollumz local installs and user state
+Sollumz/
+blender_user_config/
+blender_user_scripts/
+
+# Generated render outputs
+_vehicle_renders/
+_jobs/
+_logs/
+_work/
+*.blend
+
+# Temporary downloads/extracts
+*.zip
+*.rar
+*.7z
+*.tmp
+_sollumz_*/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
