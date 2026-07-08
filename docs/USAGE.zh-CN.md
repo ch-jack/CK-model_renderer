@@ -106,10 +106,11 @@ python ".\render_all_vehicles.py" "D:\cars" --skip-textures
 
 流程：
 
-1. 把车辆 `.ytd` 复制到临时目录。
-2. 用 YtdTools 提取 DDS。
-3. 用 texconv 转 PNG。
-4. Blender 里按 Sollumz 材质节点的纹理名绑定图片。
+1. 自动读取工具目录内置的 `vehshare*.ytd` 共享贴图。
+2. 把共享 `.ytd` 和车辆 `.ytd` 复制到临时目录。
+3. 用 YtdTools 提取 DDS。
+4. 用 texconv 转 PNG。
+5. Blender 里按 Sollumz 材质节点的纹理名绑定图片。
 
 不会直接改原始 `.ytd`。
 
@@ -139,7 +140,7 @@ _vehicle_renders/
 
 ### 图片是品红色
 
-说明贴图没绑定。现在工具会自动提取 `.ytd` 并绑定；如果还是缺图，通常是车辆依赖 GTA 原版共享贴图，但资源包没有包含这些贴图。脚本会用兜底材质避免品红。
+说明贴图没绑定。现在工具会自动提取车辆 `.ytd` 和内置 `vehshare*.ytd` 并绑定；如果还是缺图，通常是车辆还依赖其它共享贴图，需要把对应 `.ytd` 放到工具目录或 `shared_ytd` 目录。
 
 ### 车轮少一边
 

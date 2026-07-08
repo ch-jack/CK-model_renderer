@@ -23,6 +23,7 @@ class VehicleJob:
     source_dir: Path
     yft_name: str
     ytd_names: tuple[str, ...]
+    shared_ytd_paths: tuple[Path, ...]
     texture_dir: Path
     texture_log_path: Path
     output_path: Path
@@ -116,6 +117,38 @@ def matching_ytds(source_dir: Path, model: str, mode: str) -> list[str]:
     return out
 
 
+def dedupe_paths(paths: list[Path]) -> list[Path]:
+    out = []
+    seen = set()
+    for path in paths:
+        resolved = path.resolve()
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(resolved)
+    return out
+
+
+def collect_shared_ytds(input_dir: Path, specs: list[str], auto_shared: bool) -> list[Path]:
+    shared: list[Path] = []
+    for spec in specs:
+        path = Path(spec).resolve()
+        if path.is_file() and path.suffix.lower() == ".ytd":
+            shared.append(path)
+        elif path.is_dir():
+            shared.extend(p for p in path.rglob("*.ytd") if p.is_file())
+        else:
+            print(f"[textures] shared ytd path not found: {path}")
+
+    if auto_shared:
+        for root in (input_dir, SCRIPT_DIR, SCRIPT_DIR / "shared_ytd"):
+            if root.is_dir():
+                shared.extend(p for p in root.rglob("vehshare*.ytd") if p.is_file())
+
+    return dedupe_paths(shared)
+
+
 def find_rpf_tool(rpf_tool_arg: str | None) -> Path | None:
     candidates = []
     if rpf_tool_arg:
@@ -195,7 +228,7 @@ def convert_dds_to_png(dds_files: list[Path], output_dir: Path, texconv: Path, l
 
 
 def extract_textures_for_job(job: VehicleJob, args) -> None:
-    if args.skip_textures or not job.ytd_names:
+    if args.skip_textures or (not job.ytd_names and not job.shared_ytd_paths):
         return
     if job.output_path.exists() and args.skip_existing and not args.force:
         return
@@ -218,8 +251,10 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
 
         total_dds = 0
         total_png = 0
-        for ytd_name in job.ytd_names:
-            ytd_path = job.source_dir / ytd_name
+        ytd_sources = [("shared", path) for path in job.shared_ytd_paths]
+        ytd_sources.extend(("local", job.source_dir / ytd_name) for ytd_name in job.ytd_names)
+
+        for kind, ytd_path in ytd_sources:
             if not ytd_path.exists():
                 log.write(f"missing ytd: {ytd_path}\n")
                 continue
@@ -242,10 +277,11 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
                 ]
                 result = run_logged(cmd, args.ytd_tool_path.parent, log)
                 if result.returncode != 0:
-                    raise RuntimeError(f"YtdTools failed for {ytd_name} rc={result.returncode}")
+                    raise RuntimeError(f"YtdTools failed for {ytd_path.name} rc={result.returncode}")
 
                 dds_files = sorted(dds_dir.glob("*.dds"))
                 total_dds += len(dds_files)
+                log.write(f"{kind} {ytd_path} textures={len(dds_files)}\n")
                 if args.texture_format == "png" and args.texconv_path:
                     total_png += convert_dds_to_png(dds_files, job.texture_dir, args.texconv_path, log)
                 else:
@@ -301,6 +337,7 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
         "source_dir": str(source_dir),
         "yft_name": yft.name,
         "ytd_names": list(ytd_names),
+        "shared_ytd_paths": [str(p) for p in args.shared_ytd_paths],
         "texture_dir": str(texture_dir.resolve()),
         "output_path": str(output_path.resolve()),
         "width": args.width,
@@ -309,6 +346,7 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
         "engine": args.engine,
         "yaw": args.yaw,
         "elevation": args.elevation,
+        "floor_clearance": args.floor_gap,
         "orthographic": not args.perspective,
         "sollumz_path": str(Path(args.sollumz).resolve()) if args.sollumz else "",
         "blender_user_config": str(Path(args.blender_user_config).resolve()) if args.blender_user_config else "",
@@ -317,7 +355,18 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
         "blend_path": str((jobs_dir / f"{model}.blend").resolve()),
     }
     job_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return VehicleJob(model, source_dir, yft.name, ytd_names, texture_dir, texture_log_path, output_path, log_path, job_path)
+    return VehicleJob(
+        model,
+        source_dir,
+        yft.name,
+        ytd_names,
+        tuple(args.shared_ytd_paths),
+        texture_dir,
+        texture_log_path,
+        output_path,
+        log_path,
+        job_path,
+    )
 
 
 def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, float]:
@@ -392,8 +441,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine", choices=("eevee", "cycles"), default="eevee")
     parser.add_argument("--yaw", type=float, default=135.0)
     parser.add_argument("--elevation", type=float, default=24.0)
+    parser.add_argument("--floor-gap", type=float, default=0.12, help="Lower the floor below visible bounds to avoid wheel clipping.")
     parser.add_argument("--perspective", action="store_true", help="Use perspective camera instead of orthographic.")
     parser.add_argument("--ytd-mode", choices=("all", "match", "none"), default="all")
+    parser.add_argument("--shared-ytd", action="append", default=[], help="Extra shared .ytd file or folder, for example exported vehshare.ytd.")
+    parser.add_argument("--no-auto-shared-ytd", action="store_true", help="Do not auto-scan input/shared_ytd for vehshare*.ytd.")
     parser.add_argument("--skip-textures", action="store_true", help="Do not extract or bind .ytd textures.")
     parser.add_argument("--texture-format", choices=("png", "dds"), default="png", help="Texture format passed to Blender.")
     parser.add_argument("--ytd-tool", default="", help="Path to CodeWalker-based YtdTools.exe.")
@@ -447,6 +499,11 @@ def main(argv: list[str]) -> int:
         if args.texture_format == "png" and not args.texconv_path:
             print("[textures] texconv.exe not found; falling back to DDS files")
             args.texture_format = "dds"
+    args.shared_ytd_paths = tuple(
+        collect_shared_ytds(input_dir, args.shared_ytd, not args.no_auto_shared_ytd)
+        if not args.skip_textures
+        else []
+    )
 
     temp_root_obj = tempfile.TemporaryDirectory(prefix="vehicle_renderer_")
     temp_root = Path(temp_root_obj.name)
@@ -484,6 +541,8 @@ def main(argv: list[str]) -> int:
     print(f"Output: {out_dir}")
     print(f"Vehicles: {len(jobs)}")
     print(f"Workers: {workers}")
+    if args.shared_ytd_paths:
+        print(f"Shared YTD: {len(args.shared_ytd_paths)}")
 
     failures: list[tuple[str, int]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:

@@ -420,7 +420,7 @@ def mesh_objects():
         if obj.type != "MESH":
             continue
         name = obj.name.lower()
-        if name.startswith("bound ") or "collision" in name or ".bound" in name:
+        if name.startswith("bound ") or "collision" in name or ".bound" in name or name.endswith(".col") or ".col." in name:
             obj.hide_render = True
             obj.hide_viewport = True
             continue
@@ -503,14 +503,16 @@ def setup_scene(job, objects):
     offset = Vector((0, 0, 0)) - center
     for obj in objects:
         obj.location += offset
+    bpy.context.view_layer.update()
     min_v, max_v = world_bounds(objects)
     center = (min_v + max_v) * 0.5
     dims = max_v - min_v
     max_dim = max(dims.x, dims.y, dims.z, 1.0)
 
-    floor_mat = material("catalog_floor", (0.96, 0.96, 0.95, 1.0), 0.62)
+    floor_mat = material("catalog_floor", (1.0, 1.0, 1.0, 1.0), 0.58)
     floor_size = max_dim * 4.0
-    bpy.ops.mesh.primitive_plane_add(size=floor_size, location=(0, 0, min_v.z - 0.02))
+    floor_clearance = max(float(job.get("floor_clearance", 0.12)), 0.0)
+    bpy.ops.mesh.primitive_plane_add(size=floor_size, location=(0, 0, min_v.z - floor_clearance))
     floor = bpy.context.object
     floor.name = "catalog_floor"
     floor.data.materials.append(floor_mat)
@@ -542,10 +544,10 @@ def setup_scene(job, objects):
         camera.data.lens = 70
 
     light_specs = [
-        ("key", (-max_dim * 1.5, -max_dim * 2.0, max_dim * 2.4), 1350, max_dim * 3.2),
-        ("fill", (max_dim * 2.0, -max_dim * 1.0, max_dim * 1.4), 620, max_dim * 4.5),
-        ("rim", (0, max_dim * 1.8, max_dim * 2.0), 520, max_dim * 2.4),
-        ("front", (0, -max_dim * 2.8, max_dim * 1.2), 320, max_dim * 5.0),
+        ("key", (-max_dim * 1.5, -max_dim * 2.0, max_dim * 2.4), 1650, max_dim * 3.2),
+        ("fill", (max_dim * 2.0, -max_dim * 1.0, max_dim * 1.4), 900, max_dim * 4.5),
+        ("rim", (0, max_dim * 1.8, max_dim * 2.0), 650, max_dim * 2.4),
+        ("front", (0, -max_dim * 2.8, max_dim * 1.2), 520, max_dim * 5.0),
     ]
     for name, loc, power, size in light_specs:
         bpy.ops.object.light_add(type="AREA", location=loc)
@@ -585,7 +587,7 @@ def setup_render(job):
     try:
         scene.view_settings.view_transform = "Standard"
         scene.view_settings.look = "None"
-        scene.view_settings.exposure = 0.35
+        scene.view_settings.exposure = 0.55
         scene.view_settings.gamma = 1
     except Exception:
         pass
