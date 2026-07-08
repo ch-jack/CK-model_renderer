@@ -1,11 +1,17 @@
 import json
 import math
 import os
+import re
 import sys
 from pathlib import Path
 
 import bpy
 from mathutils import Vector
+
+
+TEXTURE_EXTENSIONS = (".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
+NON_COLOR_HINTS = ("bump", "normal", "nrm", "nrml", "spec", "rough", "gloss", "_s", "_n")
+PAINT_COLOR = (0.82, 0.84, 0.84, 1.0)
 
 
 def parse_args(argv):
@@ -108,6 +114,301 @@ def import_assets(source_dir, names):
     )
 
 
+def normalized_texture_name(value):
+    if not value:
+        return ""
+    name = str(value).strip().replace("\\", "/").split("/")[-1]
+    for ext in TEXTURE_EXTENSIONS:
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    name = re.sub(r"\s+\[[^\]]+\]$", "", name)
+    name = re.sub(r"\.\d{3}$", "", name)
+    return name.lower()
+
+
+def build_texture_index(texture_dir):
+    root = Path(texture_dir or "")
+    if not root.is_dir():
+        return {}
+
+    priority = {".png": 0, ".dds": 1, ".tga": 2, ".jpg": 3, ".jpeg": 3, ".bmp": 4, ".tif": 5, ".tiff": 5}
+    index = {}
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in TEXTURE_EXTENSIONS:
+            continue
+        key = normalized_texture_name(path.name)
+        if not key:
+            continue
+        old = index.get(key)
+        if old is None or priority.get(path.suffix.lower(), 99) < priority.get(old.suffix.lower(), 99):
+            index[key] = path
+    print(f"Texture files: {len(index)} from {root}")
+    return index
+
+
+def node_texture_candidates(node, material):
+    candidates = []
+    for attr in ("sollumz_texture_name",):
+        value = getattr(node, attr, "")
+        if value:
+            candidates.append(value)
+
+    image = getattr(node, "image", None)
+    if image:
+        candidates.append(image.name)
+        if image.filepath:
+            candidates.append(image.filepath)
+
+    if material:
+        candidates.append(material.name)
+    return [normalized_texture_name(value) for value in candidates if normalized_texture_name(value)]
+
+
+def is_non_color_node(node, path):
+    combined = f"{node.name} {getattr(node, 'label', '')} {path.stem}".lower()
+    return any(hint in combined for hint in NON_COLOR_HINTS)
+
+
+def set_image_color_space(image, is_data):
+    try:
+        image.colorspace_settings.is_data = bool(is_data)
+    except Exception:
+        try:
+            image.colorspace_settings.name = "Non-Color" if is_data else "sRGB"
+        except Exception:
+            pass
+
+
+def make_solid_image(name, color, is_data=False):
+    image_name = f"vehicle_renderer_{name}"
+    image = bpy.data.images.get(image_name)
+    if image is None:
+        image = bpy.data.images.new(image_name, width=4, height=4, alpha=True)
+        image.pixels.foreach_set(list(color) * 16)
+        image.pack()
+        image.update()
+    set_image_color_space(image, is_data)
+    return image
+
+
+def make_principled_material(name, color, roughness=0.35, metallic=0.0):
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    mat.diffuse_color = color
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    if bsdf:
+        set_input(bsdf, "Base Color", color)
+        set_input(bsdf, "Roughness", roughness)
+        set_input(bsdf, "Metallic", metallic)
+    return mat
+
+
+def fallback_color_for_name(name):
+    lower = name.lower()
+    if any(hint in lower for hint in ("normal", "nrm", "nrml", "bump")):
+        return "normal", (0.5, 0.5, 1.0, 1.0), True
+    if any(hint in lower for hint in ("spec", "rough", "gloss")):
+        return "spec", (0.55, 0.55, 0.55, 1.0), True
+    if any(hint in lower for hint in ("wheel", "rim", "brake", "disc")):
+        return "wheel", (0.018, 0.018, 0.017, 1.0), False
+    if "glass" in lower or "window" in lower:
+        return "glass", (0.03, 0.07, 0.08, 0.65), False
+    if any(hint in lower for hint in ("black", "tyre", "tire", "rubber", "burnt")):
+        return "black", (0.015, 0.015, 0.014, 1.0), False
+    return "paint", PAINT_COLOR, False
+
+
+def is_magenta_color(color):
+    try:
+        r, g, b = color[:3]
+    except Exception:
+        return False
+    return r > 0.65 and b > 0.65 and g < 0.28
+
+
+def neutralize_magenta_materials():
+    changed = 0
+    for material_obj in bpy.data.materials:
+        if not material_obj.use_nodes or not material_obj.node_tree:
+            continue
+        for node in material_obj.node_tree.nodes:
+            if node.bl_idname != "ShaderNodeBsdfPrincipled":
+                continue
+            base = node.inputs.get("Base Color")
+            if base and not base.is_linked and is_magenta_color(base.default_value):
+                base.default_value = PAINT_COLOR
+                material_obj.diffuse_color = PAINT_COLOR
+                changed += 1
+    return changed
+
+
+def set_input(node, name, value):
+    socket = node.inputs.get(name)
+    if socket and not socket.is_linked:
+        socket.default_value = value
+
+
+def tune_window_materials():
+    changed = 0
+    for material_obj in bpy.data.materials:
+        name = material_obj.name.lower()
+        if not any(hint in name for hint in ("glasswindows", "windscreen", "window")):
+            continue
+        material_obj.use_nodes = True
+        material_obj.diffuse_color = (0.015, 0.028, 0.03, 0.48)
+        try:
+            material_obj.blend_method = "BLEND"
+            material_obj.use_screen_refraction = True
+            material_obj.show_transparent_back = True
+        except Exception:
+            pass
+        try:
+            material_obj.surface_render_method = "BLENDED"
+        except Exception:
+            pass
+        for node in material_obj.node_tree.nodes:
+            if node.bl_idname != "ShaderNodeBsdfPrincipled":
+                continue
+            set_input(node, "Base Color", (0.015, 0.028, 0.03, 0.48))
+            set_input(node, "Alpha", 0.48)
+            set_input(node, "Roughness", 0.18)
+            set_input(node, "Metallic", 0.0)
+            set_input(node, "Coat Weight", 0.45)
+            set_input(node, "Coat Roughness", 0.12)
+            changed += 1
+    return changed
+
+
+def tune_wheel_materials():
+    changed = 0
+    wheel_dark = make_principled_material(
+        "vehicle_renderer_wheel_dark_metal",
+        (0.018, 0.018, 0.017, 1.0),
+        roughness=0.28,
+        metallic=0.55,
+    )
+    brake_dark = make_principled_material(
+        "vehicle_renderer_brake_dark",
+        (0.055, 0.052, 0.048, 1.0),
+        roughness=0.5,
+        metallic=0.25,
+    )
+    for obj in bpy.data.objects:
+        lower_obj = obj.name.lower()
+        if obj.type != "MESH" or not lower_obj.startswith("wheel_"):
+            continue
+        for slot in obj.material_slots:
+            mat = slot.material
+            mat_name = mat.name.lower() if mat else ""
+            if "tire" in mat_name or "tyre" in mat_name or "black" in mat_name:
+                continue
+            if "brake" in mat_name or "disc" in mat_name:
+                slot.material = brake_dark
+            else:
+                slot.material = wheel_dark
+            changed += 1
+    return changed
+
+
+def duplicate_mesh_at_target(source, target, name):
+    bpy.context.view_layer.update()
+    clone = source.copy()
+    clone.data = source.data.copy()
+    clone.animation_data_clear()
+    for constraint in list(clone.constraints):
+        clone.constraints.remove(constraint)
+    clone.name = name
+    clone.data.name = f"{name}.mesh"
+    clone.hide_viewport = False
+    clone.hide_render = False
+    bpy.context.collection.objects.link(clone)
+    clone.matrix_world = target.matrix_world.copy()
+    return clone
+
+
+def mirror_missing_wheels():
+    created = 0
+    objects = bpy.data.objects
+    pairs = []
+    for obj in list(objects):
+        lower = obj.name.lower()
+        if obj.type != "MESH" or not lower.startswith("wheel_l") or ".child" not in lower:
+            continue
+        target_name = "wheel_r" + obj.name[7:]
+        target_col = target_name.replace(".child", ".col")
+        pairs.append((obj.name, target_name, target_col))
+
+    for obj in list(objects):
+        lower = obj.name.lower()
+        if obj.type != "MESH" or not lower.startswith("wheel_r") or ".child" not in lower:
+            continue
+        target_name = "wheel_l" + obj.name[7:]
+        target_col = target_name.replace(".child", ".col")
+        pairs.append((obj.name, target_name, target_col))
+
+    for source_name, target_name, target_col_name in pairs:
+        if objects.get(target_name):
+            continue
+        source = objects.get(source_name)
+        target = objects.get(target_col_name)
+        if not source or not target:
+            continue
+        clone = duplicate_mesh_at_target(source, target, target_name)
+        print(f"Wheel mirror: {source_name} -> {clone.name}")
+        created += 1
+    return created
+
+
+def bind_extracted_textures(job):
+    texture_index = build_texture_index(job.get("texture_dir"))
+    if not texture_index:
+        print("Texture bind: no extracted textures")
+        return 0, 0
+
+    matched = 0
+    fallbacks = 0
+    missing = set()
+    for material_obj in bpy.data.materials:
+        if not material_obj.use_nodes or not material_obj.node_tree:
+            continue
+        for node in material_obj.node_tree.nodes:
+            if node.bl_idname != "ShaderNodeTexImage":
+                continue
+
+            candidates = node_texture_candidates(node, material_obj)
+            texture_path = next((texture_index[name] for name in candidates if name in texture_index), None)
+            if texture_path is None:
+                fallback_key = candidates[0] if candidates else normalized_texture_name(node.name)
+                fallback_name, fallback_color, fallback_data = fallback_color_for_name(fallback_key or node.name)
+                node.image = make_solid_image(fallback_name, fallback_color, fallback_data)
+                fallbacks += 1
+                if candidates:
+                    missing.add(candidates[0])
+                continue
+
+            image = bpy.data.images.load(str(texture_path), check_existing=True)
+            set_image_color_space(image, is_non_color_node(node, texture_path))
+            node.image = image
+            try:
+                node.sollumz_texture_name = texture_path.stem
+            except Exception:
+                pass
+            matched += 1
+
+    if missing:
+        preview = ", ".join(sorted(missing)[:24])
+        suffix = "..." if len(missing) > 24 else ""
+        print(f"Texture bind missing {len(missing)}: {preview}{suffix}")
+    neutralized = neutralize_magenta_materials()
+    windows = tune_window_materials()
+    wheels = tune_wheel_materials()
+    print(f"Texture bind matched: {matched}, fallback: {fallbacks}, neutralized: {neutralized}, windows: {windows}, wheels: {wheels}")
+    return matched, len(missing)
+
+
 def clear_scene():
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
@@ -207,7 +508,7 @@ def setup_scene(job, objects):
     dims = max_v - min_v
     max_dim = max(dims.x, dims.y, dims.z, 1.0)
 
-    floor_mat = material("catalog_floor", (0.82, 0.82, 0.80, 1.0), 0.7)
+    floor_mat = material("catalog_floor", (0.96, 0.96, 0.95, 1.0), 0.62)
     floor_size = max_dim * 4.0
     bpy.ops.mesh.primitive_plane_add(size=floor_size, location=(0, 0, min_v.z - 0.02))
     floor = bpy.context.object
@@ -241,9 +542,10 @@ def setup_scene(job, objects):
         camera.data.lens = 70
 
     light_specs = [
-        ("key", (-max_dim * 1.5, -max_dim * 2.0, max_dim * 2.2), 650, max_dim * 3.0),
-        ("fill", (max_dim * 2.0, -max_dim * 1.0, max_dim * 1.2), 220, max_dim * 4.0),
-        ("rim", (0, max_dim * 1.8, max_dim * 1.8), 240, max_dim * 2.0),
+        ("key", (-max_dim * 1.5, -max_dim * 2.0, max_dim * 2.4), 1350, max_dim * 3.2),
+        ("fill", (max_dim * 2.0, -max_dim * 1.0, max_dim * 1.4), 620, max_dim * 4.5),
+        ("rim", (0, max_dim * 1.8, max_dim * 2.0), 520, max_dim * 2.4),
+        ("front", (0, -max_dim * 2.8, max_dim * 1.2), 320, max_dim * 5.0),
     ]
     for name, loc, power, size in light_specs:
         bpy.ops.object.light_add(type="AREA", location=loc)
@@ -252,7 +554,7 @@ def setup_scene(job, objects):
         light.data.energy = power
         light.data.size = size
 
-    bpy.context.scene.world.color = (0.36, 0.36, 0.34)
+    bpy.context.scene.world.color = (1.0, 1.0, 1.0)
 
 
 def setup_render(job):
@@ -281,9 +583,9 @@ def setup_render(job):
                     setattr(scene.eevee, attr, int(job.get("samples", 64)))
 
     try:
-        scene.view_settings.view_transform = "Filmic"
-        scene.view_settings.look = "Medium High Contrast"
-        scene.view_settings.exposure = 0
+        scene.view_settings.view_transform = "Standard"
+        scene.view_settings.look = "None"
+        scene.view_settings.exposure = 0.35
         scene.view_settings.gamma = 1
     except Exception:
         pass
@@ -300,11 +602,12 @@ def main():
     ensure_sollumz(job)
     clear_scene()
 
-    ytds = list(job.get("ytd_names") or [])
-    if ytds:
-        import_assets(source_dir, ytds)
     import_result = import_assets(source_dir, [job["yft_name"]])
     print(f"Import result: {import_result}")
+
+    bind_extracted_textures(job)
+    wheels_created = mirror_missing_wheels()
+    print(f"Wheel mirror created: {wheels_created}")
 
     objects = mesh_objects()
     if not objects:

@@ -1,53 +1,53 @@
 # Vehicle Renderer
 
-基于 Blender + Sollumz 的 FiveM/GTA V 车辆批量渲染工具。
-
-给一个车辆资源文件夹，工具会递归扫描 `.yft` 车型文件，并用多个 Blender 后台进程并发输出 PNG 车辆预览图。
+基于 Blender + Sollumz + CodeWalker YTD 工具的 FiveM/GTA V 车辆批量渲染工具。
 
 作者：JACK  
 联系方式：QQ 2518926462
 
 ## 功能
 
-- 直接指定一个文件夹，自动扫描全部车辆 `.yft`
-- 支持 `--workers` 多进程并发渲染
-- 支持只渲染指定车型：`--model`
-- 自动识别 `*_hi.yft` 和普通 `.yft`
-- 支持指定 Blender 路径、Sollumz 插件路径
-- 支持输出日志、任务 JSON、跳过已存在图片
-- 可选用已有 `RpfTools.exe` 解包 `.rpf`
+- 指定一个车辆资源文件夹，递归扫描 `.yft` 车辆模型。
+- 自动优先使用普通 `.yft`，没有普通文件时使用 `_hi.yft`。
+- 自动读取同目录 `.ytd`，提取贴图并绑定到 Blender 材质。
+- 自动处理 Blender 缺图品红材质，给玻璃、轮毂、黑色件做兜底材质。
+- 自动补全部分车辆只导入单侧车轮的问题。
+- 支持 `--workers` 多个 Blender 后台进程并发渲染。
+- 支持指定车型、输出目录、分辨率、角度、Blender 路径、Sollumz 路径。
 
-## 环境要求
+## 快速使用
 
-- Windows
-- Python 3.7+
-- Blender 5.1 或兼容版本
-- Sollumz 2.8.x，并已安装 `szio` / `pymateria` 依赖
-
-当前测试环境：
-
-- Blender 5.1.2
-- Sollumz 2.8.3
-- Python 3.7.0 外层调度
-
-## 快速开始
-
-在本仓库目录运行：
-
-```powershell
-python .\render_all_vehicles.py "D:\path\to\vehicle_pack" --workers 3
-```
-
-在 FiveM 服务器工程的 `[Tool]` 目录下运行：
+在 FiveM 工程根目录运行：
 
 ```powershell
 python ".\[Tool]\vehicle_renderer\render_all_vehicles.py" ".\[Tool]\TestVeh" --workers 2 --force
 ```
 
-默认输出目录：
+输出目录：
 
 ```text
 <输入目录>\_vehicle_renders
+```
+
+## 依赖
+
+- Windows
+- Python 3.7+
+- Blender 5.1 或兼容版本
+- Sollumz 2.8.x
+- `[Tool]\autorpf\newdll\YtdTools.exe`
+- `[Tool]\autorpf\newdll\texconv.exe`
+
+如果 Blender 不在默认位置：
+
+```powershell
+python ".\render_all_vehicles.py" "D:\cars" --blender "C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
+```
+
+如果 Sollumz 没装进 Blender：
+
+```powershell
+python ".\render_all_vehicles.py" "D:\cars" --sollumz "D:\tools\Sollumz"
 ```
 
 ## 常用命令
@@ -55,52 +55,66 @@ python ".\[Tool]\vehicle_renderer\render_all_vehicles.py" ".\[Tool]\TestVeh" --w
 指定输出目录：
 
 ```powershell
-python .\render_all_vehicles.py "D:\cars" --out "D:\renders" --workers 4
+python ".\render_all_vehicles.py" "D:\cars" --out "D:\vehicle_images" --workers 4
 ```
 
 只渲染指定车型：
 
 ```powershell
-python .\render_all_vehicles.py "D:\cars" --model police --model sultan --workers 2
+python ".\render_all_vehicles.py" "D:\cars" --model police --model sultan --workers 2
 ```
 
-指定 Blender 和 Sollumz：
+强制覆盖旧图片：
 
 ```powershell
-python .\render_all_vehicles.py "D:\cars" --blender "C:\Program Files\Blender Foundation\Blender 5.1\blender.exe" --sollumz "D:\tools\Sollumz"
-```
-
-强制覆盖已有图片：
-
-```powershell
-python .\render_all_vehicles.py "D:\cars" --force
+python ".\render_all_vehicles.py" "D:\cars" --force
 ```
 
 跳过已有图片：
 
 ```powershell
-python .\render_all_vehicles.py "D:\cars" --skip-existing
+python ".\render_all_vehicles.py" "D:\cars" --skip-existing
+```
+
+不提取贴图，只渲染模型：
+
+```powershell
+python ".\render_all_vehicles.py" "D:\cars" --skip-textures
 ```
 
 ## 输出结构
 
 ```text
 _vehicle_renders/
-  10ttrsscpd.png
-  fordc72.png
+  car_a.png
+  car_b.png
+  _textures/
+    car_a/
+      *.png
   _jobs/
-    10ttrsscpd.json
+    car_a.json
   _logs/
-    10ttrsscpd.log
+    car_a.log
+    car_a.textures.log
 ```
 
-## 重要限制
+## 已验证
 
-当前稳定链路能可靠导入 `.yft` 模型并批量出 PNG。
+```powershell
+python ".\[Tool]\vehicle_renderer\render_all_vehicles.py" ".\[Tool]\TestVeh" --workers 2 --force
+```
 
-外部 `.ytd` 贴图字典在当前 Sollumz 路径下不会自动挂到材质上，部分车辆会显示为 Blender 的洋红色缺贴图材质。模型、角度、取景和 PNG 输出是正常的。完整贴图效果需要后续接 CodeWalker/YTD 贴图映射链路。
+测试输出：
 
-更多用法见 [docs/USAGE.zh-CN.md](docs/USAGE.zh-CN.md)。
+```text
+[ok] fordc72
+[ok] 10ttrsscpd
+Done. OK=2 FAIL=0
+```
+
+## 说明
+
+工具会从车辆资源自己的 `.ytd` 提取贴图。若车辆依赖 GTA 原版共享贴图但资源包里没有带上，渲染脚本会使用内置兜底材质避免品红缺图。共享贴图不会被打包进本仓库。
 
 ## 参考项目
 
