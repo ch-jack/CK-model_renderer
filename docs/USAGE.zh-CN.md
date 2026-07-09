@@ -205,3 +205,13 @@ vehicle_renderer\
 ```
 
 只提交运行必需文件，不提交 CodeWalker/RpfTools/YtdTools 的源码工程。
+
+## CK免费工具箱客户端入口
+
+如果不想手写命令，可以直接打开客户端工具箱：
+
+```powershell
+D:\fivem\ck_free_toolbox\start_toolbox.cmd
+```
+
+工具箱不使用后端服务。它在本机客户端里扫描载具、武器、饰品、道具等模型资源，启动 `render_all_vehicles.py`、读取日志并更新进度。第一页签是“模型自动截图”，渲染命令使用 `--asset-types all`；默认输入为 `D:\fivem\TestVeh`，默认输出为 `D:\fivem\TestVeh\_vehicle_renders`。

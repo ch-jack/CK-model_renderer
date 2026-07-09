@@ -17,7 +17,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TOOLS_DIR = SCRIPT_DIR / "tools"
 INNER_SCRIPT = SCRIPT_DIR / "blender_render_vehicle.py"
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
-LEGACY_VEHICLE_BLACK_CUTOUT_EXPOSURE = 0.35
+LEGACY_VEHICLE_BLACK_CUTOUT_EXPOSURE = -0.5
 LEGACY_VEHICLE_BLACK_CUTOUT_WORLD_STRENGTH = 0.66
 LEGACY_VEHICLE_BLACK_CUTOUT_LIGHT_SCALE = 1.45
 LEGACY_VEHICLE_BLACK_CUTOUT_KEY_PADDING = 12
@@ -875,7 +875,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--exposure",
         type=float,
         default=None,
-        help="Render exposure. Default: 0.16 with --cutout, otherwise -0.2. Vehicle black cutout compatibility uses 0.35.",
+        help="Render exposure. Default: 0.16 with --cutout, otherwise -0.2. Vehicle black cutout compatibility uses -0.5.",
     )
     parser.add_argument(
         "--world-strength",

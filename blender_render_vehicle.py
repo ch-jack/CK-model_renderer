@@ -63,7 +63,7 @@ MODEL_TONE_PALETTE = {
     "white": ((0.78, 0.79, 0.76, 1.0), (0.68, 0.69, 0.66, 1.0)),
     "black": ((0.018, 0.018, 0.017, 1.0), (0.018, 0.018, 0.017, 1.0)),
 }
-TEXTURED_BLACK_TINT = (0.24, 0.24, 0.23, 1.0)
+TEXTURED_BLACK_TINT = (0.045, 0.045, 0.04, 1.0)
 GREEN_SCREEN_COLOR = (0.0, 1.0, 0.0)
 
 
@@ -643,9 +643,78 @@ def neutral_vehicle_black_tone_factor(name):
     return 0.0
 
 
-def textured_black_tone_factor(material_obj):
-    if use_legacy_vehicle_black_cutout() or ASSET_KIND != "vehicle" or MODEL_TONE != "black":
+def legacy_vehicle_black_tone_factor(name):
+    raw = str(name or "").lower()
+    key = normalized_texture_name(name)
+    if not key:
         return 0.0
+
+    semantic = material_semantic(name)
+    if semantic in {"glass", "light", "rubber", "brake", "leather", "fabric"}:
+        return 0.0
+
+    # Black model is a vehicle-wide exterior tone. Keep functional/transparent
+    # materials readable, but darken unknown exterior body textures by default.
+    protected = (
+        "glass",
+        "window",
+        "windscreen",
+        "interior",
+        "seat",
+        "sitz",
+        "floor",
+        "carpet",
+        "screen",
+        "display",
+        "red",
+        "yellow",
+        "emis",
+        "emiss",
+        "tire",
+        "tyre",
+        "rubber",
+        "sidewall",
+        "pzero",
+        "tyrewall",
+        "wheel",
+        "rim",
+        "brake",
+        "disc",
+        "rotor",
+        "caliper",
+        "calliper",
+        "plate",
+        "license",
+        "dial",
+        "gauge",
+        "tacho",
+        "dash",
+        "radio",
+        "pedal",
+        "cup",
+        "matratze",
+        "fabric",
+        "cloth",
+        "leather",
+        "leder",
+    )
+    protected_tags = ("[wheel]", "[rim]", "[tire]", "[tyre]", "[brake]")
+    if key.startswith("lc_") or any(hint in key for hint in protected) or any(tag in raw for tag in protected_tags):
+        return 0.0
+    if "[primary]" in raw or "[secondary]" in raw:
+        return 0.96
+    if key.isdigit() or key == "matte":
+        return 0.96
+    if is_paint_like_material(name):
+        return 0.94
+    return 0.90
+
+
+def textured_black_tone_factor(material_obj):
+    if ASSET_KIND != "vehicle" or MODEL_TONE != "black":
+        return 0.0
+    if use_legacy_vehicle_black_cutout():
+        return legacy_vehicle_black_tone_factor(material_obj.name)
     if is_paint_like_material(material_obj.name):
         return 1.0
     return neutral_vehicle_black_tone_factor(material_obj.name)
@@ -1038,31 +1107,20 @@ def is_brake_like_material_name(name):
 
 
 def is_light_like_material_name(name):
-    return any(
-        hint in name
-        for hint in (
-            "light",
-            "emiss",
-            "emissive",
-            "emission",
-            "emit",
-            "headlamp",
-            "headlight",
-            "tail",
-            "brake_l",
-            "indicator",
-            "signal",
-            "turn",
-            "rearlight",
-            "siren",
-            "lightbar",
-            "light_bar",
-            "beacon",
-            "strobe",
-            "led",
-            "neon",
-        )
-    )
+    key = normalized_texture_name(name)
+    tokens = [token for token in re.split(r"[^a-z0-9]+", key.replace("_", " ")) if token]
+    joined = "_".join(tokens)
+    if any(hint in key for hint in ("emiss", "emission", "emit", "headlamp", "headlight", "rearlight", "taillight", "lightbar", "light_bar", "siren", "beacon", "strobe", "neon")):
+        return True
+    if any(token in {"indicator", "signal", "turn"} for token in tokens):
+        return True
+    if "brake_l" in key:
+        return True
+    if any(token in {"tail", "led"} for token in tokens):
+        return True
+    if any(token in {"light", "lights", "lamp", "lamps"} for token in tokens):
+        return not any(color in tokens for color in ("gray", "grey", "black", "white"))
+    return False
 
 
 def material_semantic(name):
@@ -1665,7 +1723,7 @@ def bind_extracted_textures(job):
     window_tunes = tune_window_materials()
     if use_legacy_vehicle_black_cutout():
         surface_tunes = tune_legacy_vehicle_black_semantic_materials()
-        paint_texture_tones = 0
+        paint_texture_tones = tint_textured_paint_materials()
     else:
         surface_tunes = tune_semantic_materials(bool(job.get("special_lights", True)))
         paint_texture_tones = tint_textured_paint_materials()
