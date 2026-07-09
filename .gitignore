@@ -19,6 +19,7 @@ _work/
 *.7z
 *.tmp
 _sollumz_*/
+tools/*.dds
 
 # OS/editor
 .DS_Store

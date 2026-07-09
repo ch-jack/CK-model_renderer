@@ -14,7 +14,9 @@ from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+TOOLS_DIR = SCRIPT_DIR / "tools"
 INNER_SCRIPT = SCRIPT_DIR / "blender_render_vehicle.py"
+ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ class VehicleJob:
     texture_dir: Path
     texture_log_path: Path
     output_path: Path
+    final_output_path: Path
     log_path: Path
     job_path: Path
 
@@ -89,7 +92,7 @@ def scan_vehicle_yfts(root: Path, selected_models: set[str] | None) -> list[Path
 
     result = []
     for item in by_model.values():
-        result.append(item.get("base") or item["hi"])
+        result.append(item.get("hi") or item["base"])
     return sorted(result, key=lambda p: (str(p.parent).lower(), clean_model_name(p).lower()))
 
 
@@ -155,6 +158,7 @@ def find_rpf_tool(rpf_tool_arg: str | None) -> Path | None:
         candidates.append(Path(rpf_tool_arg))
     candidates.extend(
         [
+            TOOLS_DIR / "RpfTools.exe",
             Path.cwd() / "[Tool]" / "autorpf" / "newdll" / "RpfTools.exe",
             Path.cwd() / "[Tool]" / "autorpf" / "RpfTools" / "RpfTools" / "bin" / "Debug" / "RpfTools.exe",
         ]
@@ -171,10 +175,31 @@ def find_support_tool(tool_arg: str | None, filename: str) -> Path | None:
         candidates.append(Path(tool_arg))
     candidates.extend(
         [
+            TOOLS_DIR / filename,
             SCRIPT_DIR.parent / "autorpf" / "newdll" / filename,
             Path.cwd() / "[Tool]" / "autorpf" / "newdll" / filename,
         ]
     )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def find_archive_tool(tool_arg: str | None) -> Path | None:
+    candidates = []
+    if tool_arg:
+        candidates.append(Path(tool_arg))
+    candidates.extend(
+        [
+            TOOLS_DIR / "7z.exe",
+            Path(r"C:\Program Files\7-Zip\7z.exe"),
+            Path(r"C:\Program Files (x86)\7-Zip\7z.exe"),
+        ]
+    )
+    where_7z = shutil.which("7z") or shutil.which("7z.exe")
+    if where_7z:
+        candidates.append(Path(where_7z))
     for candidate in candidates:
         if candidate.exists():
             return candidate.resolve()
@@ -187,7 +212,25 @@ def clear_texture_dir(texture_dir: Path, textures_root: Path) -> None:
     if textures_root not in texture_dir.parents:
         raise RuntimeError(f"Refusing to clear texture dir outside {textures_root}: {texture_dir}")
     if texture_dir.exists():
-        shutil.rmtree(texture_dir)
+        def onerror(func, path, exc_info):
+            try:
+                os.chmod(path, 0o700)
+                func(path)
+            except Exception:
+                raise exc_info[1]
+
+        for attempt in range(5):
+            try:
+                shutil.rmtree(texture_dir, onerror=onerror)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.4)
+
+
+def texture_manifest_key(path: Path) -> str:
+    return path.stem.strip().lower()
 
 
 def chunked(items: list[Path], size: int):
@@ -212,6 +255,49 @@ def run_logged(cmd: list[str], cwd: Path, log) -> subprocess.CompletedProcess:
     log.write(f"\nexit={result.returncode}\n\n")
     log.flush()
     return result
+
+
+def safe_folder_name(path: Path) -> str:
+    name = path.stem or path.name
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name)[:80] or "archive"
+
+
+def unpack_archives(input_dir: Path, work_dir: Path, archive_tool: Path | None) -> list[Path]:
+    roots: list[Path] = []
+    archives = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in ARCHIVE_EXTENSIONS]
+    if not archives:
+        return roots
+    if not archive_tool:
+        print("[archive] 7z.exe not found; skip .zip/.rar/.7z unpack")
+        return roots
+
+    unpack_root = work_dir / "archive_unpacked"
+    unpack_root.mkdir(parents=True, exist_ok=True)
+    queue = sorted(archives)
+    seen: set[str] = set()
+    index = 0
+    while queue:
+        archive = queue.pop(0)
+        key = str(archive.resolve()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        index += 1
+        out_dir = unpack_root / f"{index:04d}_{safe_folder_name(archive)}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log_path = out_dir / "_archive_unpack.log"
+        cmd = [str(archive_tool), "x", "-y", f"-o{out_dir}", str(archive)]
+        print(f"[archive] unpack {archive}")
+        with log_path.open("w", encoding="utf-8", errors="replace") as log:
+            result = run_logged(cmd, archive_tool.parent, log)
+        if result.returncode != 0:
+            print(f"[archive] failed {archive} rc={result.returncode}")
+            continue
+        roots.append(out_dir)
+        queue.extend(
+            p for p in out_dir.rglob("*") if p.is_file() and p.suffix.lower() in ARCHIVE_EXTENSIONS
+        )
+    return roots
 
 
 def convert_dds_to_png(dds_files: list[Path], output_dir: Path, texconv: Path, log) -> int:
@@ -251,6 +337,7 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
 
         total_dds = 0
         total_png = 0
+        manifest: dict[str, list[str]] = {"local": [], "shared": []}
         ytd_sources = [("shared", path) for path in job.shared_ytd_paths]
         ytd_sources.extend(("local", job.source_dir / ytd_name) for ytd_name in job.ytd_names)
 
@@ -281,6 +368,7 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
 
                 dds_files = sorted(dds_dir.glob("*.dds"))
                 total_dds += len(dds_files)
+                manifest.setdefault(kind, []).extend(texture_manifest_key(dds) for dds in dds_files)
                 log.write(f"{kind} {ytd_path} textures={len(dds_files)}\n")
                 if args.texture_format == "png" and args.texconv_path:
                     total_png += convert_dds_to_png(dds_files, job.texture_dir, args.texconv_path, log)
@@ -289,13 +377,26 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
                         shutil.copy2(dds, job.texture_dir / dds.name)
 
         log.write(f"dds={total_dds}\npng={total_png}\n")
+        manifest = {key: sorted(set(value)) for key, value in manifest.items()}
+        (job.texture_dir / "_texture_manifest.json").write_text(
+            json.dumps(manifest, indent=2),
+            encoding="utf-8",
+        )
         if total_dds == 0:
             print(f"[textures] no textures extracted for {job.model}")
 
 
-def unpack_rpfs(input_dir: Path, work_dir: Path, rpf_tool: Path) -> list[Path]:
+def unpack_rpfs(scan_roots: list[Path], work_dir: Path, rpf_tool: Path) -> list[Path]:
     roots = []
-    rpf_files = sorted(input_dir.rglob("*.rpf"))
+    rpf_files = []
+    seen_rpfs: set[str] = set()
+    for root in scan_roots:
+        for rpf in root.rglob("*.rpf"):
+            key = str(rpf.resolve()).lower()
+            if rpf.is_file() and key not in seen_rpfs:
+                seen_rpfs.add(key)
+                rpf_files.append(rpf)
+    rpf_files = sorted(rpf_files)
     if not rpf_files:
         return roots
 
@@ -326,7 +427,18 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
     model = clean_model_name(yft)
     source_dir = yft.parent.resolve()
     ytd_names = tuple(matching_ytds(source_dir, model, args.ytd_mode))
-    output_path = out_dir / f"{model}.png"
+    if args.cutout:
+        output_path = out_dir / "_alpha" / f"{model}.png"
+        green_screen_path = out_dir / "_greenscreen" / f"{model}.png"
+        final_output_path = out_dir / f"{model}.png"
+    else:
+        output_path = out_dir / f"{model}.png"
+        green_screen_path = None
+        final_output_path = output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if green_screen_path:
+        green_screen_path.parent.mkdir(parents=True, exist_ok=True)
+    final_output_path.parent.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"{model}.log"
     texture_dir = out_dir / "_textures" / model
     texture_log_path = logs_dir / f"{model}.textures.log"
@@ -339,13 +451,22 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
         "ytd_names": list(ytd_names),
         "shared_ytd_paths": [str(p) for p in args.shared_ytd_paths],
         "texture_dir": str(texture_dir.resolve()),
+        "texture_manifest_path": str((texture_dir / "_texture_manifest.json").resolve()),
         "output_path": str(output_path.resolve()),
+        "green_screen_path": str(green_screen_path.resolve()) if green_screen_path else "",
+        "cutout_path": str(final_output_path.resolve()) if args.cutout else "",
+        "green_screen": args.cutout,
+        "key_threshold": args.key_threshold,
+        "key_padding": args.key_padding,
         "width": args.width,
         "height": args.height,
         "samples": args.samples,
         "engine": args.engine,
         "yaw": args.yaw,
         "elevation": args.elevation,
+        "exposure": args.exposure,
+        "world_strength": args.world_strength,
+        "light_scale": args.light_scale,
         "floor_clearance": args.floor_gap,
         "orthographic": not args.perspective,
         "sollumz_path": str(Path(args.sollumz).resolve()) if args.sollumz else "",
@@ -364,6 +485,7 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
         texture_dir,
         texture_log_path,
         output_path,
+        final_output_path,
         log_path,
         job_path,
     )
@@ -371,10 +493,12 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
 
 def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, float]:
     started = time.time()
-    if job.output_path.exists() and args.skip_existing and not args.force:
+    if job.final_output_path.exists() and args.skip_existing and not args.force:
         return job.model, 0, 0.0
     if args.force and job.output_path.exists():
         job.output_path.unlink()
+    if args.force and job.final_output_path.exists() and job.final_output_path != job.output_path:
+        job.final_output_path.unlink()
 
     try:
         extract_textures_for_job(job, args)
@@ -420,14 +544,52 @@ def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, flo
             log.write(f"\nTIMEOUT after {args.timeout}s\n")
 
     elapsed = time.time() - started
-    if rc == 0 and not job.output_path.exists():
+    if rc == 0 and not job.final_output_path.exists():
         rc = 2
     return job.model, rc, elapsed
 
 
+def run_green_key(blender: Path, args) -> int:
+    input_path = Path(args.key_green).resolve()
+    if not input_path.exists():
+        raise FileNotFoundError(input_path)
+    if args.key_out:
+        output_path = Path(args.key_out).resolve()
+    elif input_path.is_dir():
+        output_path = input_path.parent / f"{input_path.name}_cutouts"
+    else:
+        output_path = input_path.with_name(f"{input_path.stem}_cutout.png")
+
+    cmd = [
+        str(blender),
+        "--background",
+        "--python",
+        str(INNER_SCRIPT),
+        "--",
+        f"key_input={input_path}",
+        f"key_output={output_path}",
+        f"key_threshold={args.key_threshold}",
+        f"key_padding={args.key_padding}",
+    ]
+    print(" ".join(cmd))
+    result = subprocess.run(cmd, cwd=str(SCRIPT_DIR))
+    if result.returncode == 0:
+        print(f"Cutout output: {output_path}")
+    return result.returncode
+
+
+def apply_render_defaults(args) -> None:
+    if args.exposure is None:
+        args.exposure = 0.75 if args.cutout else -0.2
+    if args.world_strength is None:
+        args.world_strength = 0.78 if args.cutout else 0.45
+    if args.light_scale is None:
+        args.light_scale = 1.85 if args.cutout else 0.72
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Batch render GTA/FiveM vehicles with Blender and Sollumz.")
-    parser.add_argument("input", help="Folder containing extracted FiveM vehicle resources.")
+    parser.add_argument("input", nargs="?", help="Folder containing archives or extracted FiveM vehicle resources.")
     parser.add_argument("--out", default="", help="Output folder. Default: <input>/_vehicle_renders")
     parser.add_argument("--workers", type=int, default=default_workers(), help="Parallel Blender process count.")
     parser.add_argument("--model", action="append", default=[], help="Only render this model name. Can be repeated.")
@@ -440,8 +602,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--engine", choices=("eevee", "cycles"), default="eevee")
     parser.add_argument("--yaw", type=float, default=135.0)
-    parser.add_argument("--elevation", type=float, default=24.0)
+    parser.add_argument("--elevation", type=float, default=26.0)
+    parser.add_argument(
+        "--exposure",
+        type=float,
+        default=None,
+        help="Render exposure. Default: 0.75 with --cutout, otherwise -0.2.",
+    )
+    parser.add_argument(
+        "--world-strength",
+        type=float,
+        default=None,
+        help="White world light strength. Default: 0.78 with --cutout, otherwise 0.45.",
+    )
+    parser.add_argument(
+        "--light-scale",
+        type=float,
+        default=None,
+        help="Multiplier for all area lights. Default: 1.85 with --cutout, otherwise 0.72.",
+    )
     parser.add_argument("--floor-gap", type=float, default=0.12, help="Lower the floor below visible bounds to avoid wheel clipping.")
+    parser.add_argument("--cutout", action="store_true", help="Render green screen and output transparent cropped PNG.")
+    parser.add_argument("--key-green", default="", help="Standalone green-screen PNG file/folder to key and crop.")
+    parser.add_argument("--key-out", default="", help="Output file/folder for --key-green.")
+    parser.add_argument("--key-threshold", type=int, default=70, help="Green key threshold, 0-255.")
+    parser.add_argument("--key-padding", type=int, default=12, help="Transparent cutout padding in pixels.")
     parser.add_argument("--perspective", action="store_true", help="Use perspective camera instead of orthographic.")
     parser.add_argument("--ytd-mode", choices=("all", "match", "none"), default="all")
     parser.add_argument("--shared-ytd", action="append", default=[], help="Extra shared .ytd file or folder, for example exported vehshare.ytd.")
@@ -454,14 +639,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--timeout", type=int, default=420)
     parser.add_argument("--save-blend", action="store_true", help="Save per-model .blend files into _jobs.")
-    parser.add_argument("--unpack-rpf", action="store_true", help="Also unpack .rpf files with existing RpfTools.exe.")
+    parser.add_argument("--no-unpack", action="store_true", help="Do not auto-unpack .zip/.rar/.7z/.rpf input files.")
+    parser.add_argument("--unpack-rpf", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--rpf-tool", default="", help="Path to RpfTools.exe.")
+    parser.add_argument("--archive-tool", default="", help="Path to 7z.exe for .zip/.rar/.7z.")
     parser.add_argument("--keep-work", action="store_true", help="Keep temporary RPF extraction folder.")
     return parser
 
 
 def main(argv: list[str]) -> int:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    apply_render_defaults(args)
+    if args.key_green:
+        blender = find_blender(args.blender)
+        return run_green_key(blender, args)
+    if not args.input:
+        parser.error("input is required unless --key-green is used")
+
     input_dir = Path(args.input).resolve()
     if not input_dir.exists():
         raise FileNotFoundError(input_dir)
@@ -509,11 +704,14 @@ def main(argv: list[str]) -> int:
     temp_root = Path(temp_root_obj.name)
 
     scan_roots = [input_dir]
-    if args.unpack_rpf:
+    if not args.no_unpack:
+        archive_tool = find_archive_tool(args.archive_tool)
+        scan_roots.extend(unpack_archives(input_dir, temp_root, archive_tool))
         rpf_tool = find_rpf_tool(args.rpf_tool)
-        if not rpf_tool:
-            raise FileNotFoundError("RpfTools.exe not found. Pass --rpf-tool.")
-        scan_roots.extend(unpack_rpfs(input_dir, temp_root, rpf_tool))
+        if rpf_tool:
+            scan_roots.extend(unpack_rpfs(scan_roots, temp_root, rpf_tool))
+        elif any(root.rglob("*.rpf") for root in scan_roots):
+            print("[rpf] RpfTools.exe not found; skip .rpf unpack")
 
     selected_models = {m.lower() for m in args.model} if args.model else None
     yfts: list[Path] = []
@@ -543,6 +741,8 @@ def main(argv: list[str]) -> int:
     print(f"Workers: {workers}")
     if args.shared_ytd_paths:
         print(f"Shared YTD: {len(args.shared_ytd_paths)}")
+    if args.cutout:
+        print("Cutout: green-screen key + crop")
 
     failures: list[tuple[str, int]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
