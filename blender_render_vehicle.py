@@ -10,7 +10,7 @@ from mathutils import Matrix, Vector
 
 
 TEXTURE_EXTENSIONS = (".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
-NON_COLOR_HINTS = ("bump", "normal", "nrm", "nrml", "spec", "rough", "gloss", "_s", "_n")
+NON_COLOR_HINTS = ("bump", "normal", "nrm", "nrml", "spec", "rough", "gloss")
 LIVERY_HINTS = ("livery", "sign", "skin", "decal", "police", "ems", "lsmd", "sheriff")
 GENERIC_AUTO_LIVERY_PREFIXES = ("police_new", "vehicle_", "generic_", "vehshare")
 WHEEL_COLOR_HINTS = ("wheel", "rim", "alloy")
@@ -53,7 +53,25 @@ COLOR_TEXTURE_EXCLUDE_HINTS = (
     "leather",
 )
 PAINT_COLOR = (0.30, 0.31, 0.30, 1.0)
+CHROME_FALLBACK_COLOR = (0.26, 0.27, 0.26, 1.0)
+MODEL_TONE_PALETTE = {
+    "gray": ((0.30, 0.31, 0.30, 1.0), (0.26, 0.27, 0.26, 1.0)),
+    "white": ((0.78, 0.79, 0.76, 1.0), (0.68, 0.69, 0.66, 1.0)),
+    "black": ((0.018, 0.018, 0.017, 1.0), (0.018, 0.018, 0.017, 1.0)),
+}
 GREEN_SCREEN_COLOR = (0.0, 1.0, 0.0)
+
+
+def apply_model_tone(job):
+    global PAINT_COLOR, CHROME_FALLBACK_COLOR
+    tone = str(job.get("model_tone", "gray")).lower()
+    paint, chrome = MODEL_TONE_PALETTE.get(tone, MODEL_TONE_PALETTE["gray"])
+    if job.get("asset_kind", "vehicle") != "vehicle" and tone == "gray":
+        paint = (0.18, 0.18, 0.17, 1.0)
+        chrome = (0.16, 0.16, 0.15, 1.0)
+    PAINT_COLOR = paint
+    CHROME_FALLBACK_COLOR = chrome
+    print(f"Model tone: {tone} paint={PAINT_COLOR[:3]}")
 
 
 def parse_args(argv):
@@ -407,6 +425,52 @@ def load_texture_manifest(job):
     }
 
 
+def write_texture_bind_report(
+    job,
+    texture_index,
+    texture_manifest,
+    matched,
+    missing,
+    livery_links,
+    generic_links,
+    part_links,
+    window_tunes,
+    surface_tunes,
+):
+    report_path = job.get("texture_bind_report_path")
+    if not report_path and job.get("texture_dir"):
+        report_path = str(Path(job["texture_dir"]) / "_texture_bind_report.json")
+    if not report_path:
+        return
+
+    path = Path(report_path)
+    report = {
+        "model": job.get("model", ""),
+        "asset_kind": job.get("asset_kind", "vehicle"),
+        "texture_dir": job.get("texture_dir", ""),
+        "texture_files": len(texture_index),
+        "matched": int(matched),
+        "missing": sorted(str(name) for name in missing),
+        "livery_links": int(livery_links),
+        "generic_links": int(generic_links),
+        "part_links": int(part_links),
+        "window_tunes": int(window_tunes),
+        "surface_tunes": int(surface_tunes),
+        "manifest": {
+            key: sorted(str(name) for name in value)
+            for key, value in texture_manifest.items()
+        },
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"Texture bind report: {path}")
+    except Exception as exc:
+        print(f"Texture bind report failed: {exc}")
+
+
+
+
 def model_texture_fragments(model):
     compact = re.sub(r"[^a-z0-9]+", "", str(model or "").lower())
     fragments = set()
@@ -576,7 +640,10 @@ def strip_texture_suffix(name):
 
 
 def is_non_color_texture_name(name):
-    return any(hint in name for hint in NON_COLOR_HINTS)
+    key = normalized_texture_name(name)
+    if any(hint in key for hint in NON_COLOR_HINTS):
+        return True
+    return key.endswith(("_s", "_n"))
 
 
 def material_texture_match_score(material_name, path, local_texture_names):
@@ -648,6 +715,86 @@ def find_material_color_texture(material_name, texture_index, local_texture_name
     if not candidates:
         return None
     return max(candidates, key=lambda item: item[0])[1]
+
+def texture_pixel_size(path):
+    try:
+        image = bpy.data.images.load(str(path), check_existing=True)
+        width, height = image.size
+        return int(width) * int(height)
+    except Exception:
+        return 0
+
+
+def generic_asset_texture_score(path, local_texture_names):
+    key = normalized_texture_name(path.name)
+    if local_texture_names and key not in local_texture_names:
+        return None
+    if is_non_color_texture_name(key):
+        return None
+    if any(hint in key for hint in ("normal", "spec", "rough", "gloss", "ao", "height", "metallic", "bump", "mask")):
+        return None
+    if any(hint in key for hint in ("decal", "plate", "font", "dirt", "mud", "burnt", "dpal", "tint", "palette")):
+        return None
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if size < 1024:
+        return None
+    score = size
+    if any(hint in key for hint in ("basecolor", "diffuse", "albedo", "color")) or key.endswith(("_d", "_diff")):
+        score += 10_000_000
+    if key.startswith(("w_", "weapon_")):
+        score += 5_000_000
+    if key.endswith("_d") or key.endswith("_diff"):
+        score += 3_000_000
+    if texture_pixel_size(path) < 64:
+        return None
+    return score
+
+
+def find_generic_asset_texture(texture_index, local_texture_names):
+    candidates = []
+    for path in texture_index.values():
+        score = generic_asset_texture_score(path, local_texture_names)
+        if score is not None:
+            candidates.append((score, path))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def bind_generic_asset_texture(texture_index, texture_manifest, job):
+    if job.get("asset_kind", "vehicle") == "vehicle":
+        return 0
+    local_texture_names = texture_manifest.get("local", set())
+    if not local_texture_names:
+        print(f"Texture bind local missing: {job.get('model', '')} has no local YTD textures")
+        return 0
+    texture_path = find_generic_asset_texture(texture_index, local_texture_names)
+    if texture_path is None:
+        return 0
+    image = bpy.data.images.load(str(texture_path), check_existing=True)
+    set_image_color_space(image, False)
+    linked = 0
+    names = []
+    for material_obj in bpy.data.materials:
+        if not material_obj.use_nodes or not material_obj.node_tree:
+            continue
+        if material_semantic(material_obj.name) in {"glass", "light"}:
+            continue
+        for node in material_obj.node_tree.nodes:
+            if node.bl_idname != "ShaderNodeBsdfPrincipled":
+                continue
+            if base_color_has_upstream_texture(node):
+                continue
+            if link_image_to_base_color(material_obj, node, image, texture_path.stem):
+                linked += 1
+                names.append(material_obj.name)
+    if linked:
+        print(f"Generic asset texture linked: {texture_path.stem} -> {linked}")
+        print("Generic asset materials: " + ", ".join(names[:24]))
+    return linked
 
 
 def wheel_object_material_names():
@@ -807,6 +954,9 @@ def is_light_like_material_name(name):
         for hint in (
             "light",
             "emiss",
+            "emissive",
+            "emission",
+            "emit",
             "headlamp",
             "headlight",
             "tail",
@@ -815,6 +965,13 @@ def is_light_like_material_name(name):
             "signal",
             "turn",
             "rearlight",
+            "siren",
+            "lightbar",
+            "light_bar",
+            "beacon",
+            "strobe",
+            "led",
+            "neon",
         )
     )
 
@@ -899,7 +1056,66 @@ def is_catalog_paint_slot(name):
     )
 
 
-def tune_semantic_materials():
+def light_effect_color(name):
+    key = normalized_texture_name(name)
+    if any(hint in key for hint in ("blue", "siren", "police", "lightbar", "light_bar")):
+        return (0.12, 0.34, 1.0, 1.0)
+    if any(hint in key for hint in ("tail", "brake", "rear", "red")):
+        return (1.0, 0.03, 0.015, 1.0)
+    if any(hint in key for hint in ("indicator", "signal", "turn", "amber", "orange", "yellow")):
+        return (1.0, 0.45, 0.04, 1.0)
+    if any(hint in key for hint in ("green", "neon")):
+        return (0.08, 1.0, 0.18, 1.0)
+    return (0.9, 0.96, 1.0, 1.0)
+
+
+def is_police_light_name(name):
+    key = normalized_texture_name(name)
+    return any(hint in key for hint in ("siren", "police", "lightbar", "light_bar", "beacon", "strobe"))
+
+
+def is_self_emissive_name(name):
+    key = normalized_texture_name(name)
+    return (
+        any(hint in key for hint in ("emiss", "emission", "emit", "neon"))
+        or key.endswith("_e")
+    )
+
+
+def should_emit_material(name):
+    key = normalized_texture_name(name)
+    if is_police_light_name(key) or is_self_emissive_name(key):
+        return True
+    return any(
+        hint in key
+        for hint in ("headlamp", "headlight", "tail", "brake_l", "indicator", "signal", "turn", "rearlight")
+    )
+
+
+def set_emission_inputs(node, color, strength):
+    set_first_input(node, ("Emission Color", "Emission"), color)
+    set_input(node, "Emission Strength", strength)
+
+
+def current_material_color(material_obj, node):
+    socket = node.inputs.get("Base Color") if node else None
+    if socket is not None:
+        try:
+            value = tuple(socket.default_value)
+            if len(value) >= 4:
+                return value[:4]
+        except Exception:
+            pass
+    try:
+        value = tuple(material_obj.diffuse_color)
+        if len(value) >= 4:
+            return value[:4]
+    except Exception:
+        pass
+    return (1.0, 1.0, 1.0, 1.0)
+
+
+def tune_semantic_materials(enable_emission=True):
     changed = 0
     for material_obj in bpy.data.materials:
         semantic = material_semantic(material_obj.name)
@@ -910,7 +1126,7 @@ def tune_semantic_materials():
         for node in material_obj.node_tree.nodes:
             if node.bl_idname != "ShaderNodeBsdfPrincipled":
                 continue
-            if color and not base_color_has_upstream_texture(node):
+            if semantic != "light" and color and not base_color_has_upstream_texture(node):
                 force_input(node, "Base Color", color)
                 material_obj.diffuse_color = color
             if semantic == "rubber":
@@ -923,7 +1139,7 @@ def tune_semantic_materials():
                 set_first_input(node, ("Specular IOR Level", "Specular"), 0.55)
             elif semantic == "chrome":
                 if material_uses_generic_tiny_texture(material_obj, ("chrome", "vehicle_generic_smallspecmap")):
-                    chrome_fallback = (0.26, 0.27, 0.26, 1.0)
+                    chrome_fallback = CHROME_FALLBACK_COLOR
                     force_input(node, "Base Color", chrome_fallback)
                     material_obj.diffuse_color = chrome_fallback
                     force_input(node, "Roughness", 0.50)
@@ -968,9 +1184,13 @@ def tune_semantic_materials():
                 set_input(node, "Metallic", 0.0)
                 set_first_input(node, ("Specular IOR Level", "Specular"), 0.42)
             elif semantic == "light":
+                light_color = current_material_color(material_obj, node)
+                if enable_emission and should_emit_material(material_obj.name):
+                    strength = 2.4 if is_police_light_name(material_obj.name) else 1.15
+                    set_emission_inputs(node, light_color, strength)
                 set_input(node, "Roughness", 0.12)
                 set_input(node, "Metallic", 0.0)
-                set_first_input(node, ("Specular IOR Level", "Specular"), 0.85)
+                set_first_input(node, ("Specular IOR Level", "Specular"), 0.72)
             changed += 1
     return changed
 
@@ -1217,10 +1437,11 @@ def mirror_missing_wheels():
 
 def bind_extracted_textures(job):
     texture_index = build_texture_index(job.get("texture_dir"))
+    texture_manifest = load_texture_manifest(job)
     if not texture_index:
         print("Texture bind: no extracted textures")
+        write_texture_bind_report(job, texture_index, texture_manifest, 0, set(), 0, 0, 0, 0, 0)
         return 0, 0
-    texture_manifest = load_texture_manifest(job)
 
     matched = 0
     missing = set()
@@ -1252,15 +1473,28 @@ def bind_extracted_textures(job):
         suffix = "..." if len(missing) > 24 else ""
         print(f"Texture bind missing {len(missing)}: {preview}{suffix}")
     livery_links = bind_auto_livery_materials(texture_index, job, texture_manifest)
+    generic_links = bind_generic_asset_texture(texture_index, texture_manifest, job)
     part_links = bind_untextured_materials(texture_index, texture_manifest)
     window_tunes = tune_window_materials()
-    surface_tunes = tune_semantic_materials()
+    surface_tunes = tune_semantic_materials(bool(job.get("special_lights", True)))
     dump_wheel_materials()
     print(
         f"Texture bind matched: {matched}, missing: {len(missing)}, "
-        f"livery_links: {livery_links}, part_links: {part_links}, "
+        f"livery_links: {livery_links}, generic_links: {generic_links}, part_links: {part_links}, "
         f"window_tunes: {window_tunes}, surface_tunes: {surface_tunes}. "
         "Material parameters preserved."
+    )
+    write_texture_bind_report(
+        job,
+        texture_index,
+        texture_manifest,
+        matched,
+        missing,
+        livery_links,
+        generic_links,
+        part_links,
+        window_tunes,
+        surface_tunes,
     )
     return matched, len(missing)
 
@@ -1589,7 +1823,7 @@ def green_key_alpha(r, g, b, threshold):
     return 1.0 - ((dominance - (threshold - soft)) / soft)
 
 
-def process_green_image(input_path, output_path, threshold=70, padding=12):
+def process_green_image(input_path, output_path, threshold=70, padding=0):
     input_path = Path(input_path).resolve()
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1694,7 +1928,7 @@ def normalize_alpha(alpha, background_alpha):
     return 0.0 if normalized <= 0.035 else normalized
 
 
-def save_green_preview_and_cutout(alpha_path, green_path, cutout_path, padding=12):
+def save_green_preview_and_cutout(alpha_path, green_path, cutout_path, padding=0):
     alpha_path = Path(alpha_path).resolve()
     green_path = Path(green_path).resolve()
     cutout_path = Path(cutout_path).resolve()
@@ -1764,7 +1998,7 @@ def save_green_preview_and_cutout(alpha_path, green_path, cutout_path, padding=1
     print(f"Alpha cutout: {alpha_path} -> {cutout_path} (background_alpha={background_alpha:.4f})")
 
 
-def process_green_tree(input_path, output_path, threshold=70, padding=12):
+def process_green_tree(input_path, output_path, threshold=70, padding=0):
     input_path = Path(input_path).resolve()
     output_path = Path(output_path).resolve()
     if input_path.is_file():
@@ -1793,6 +2027,7 @@ def main():
 
     job_path = Path(args["job"]).resolve()
     job = json.loads(job_path.read_text(encoding="utf-8"))
+    apply_model_tone(job)
     source_dir = Path(job["source_dir"]).resolve()
     output_path = Path(job["output_path"]).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1800,11 +2035,12 @@ def main():
     ensure_sollumz(job)
     clear_scene()
 
-    import_result = import_assets(source_dir, [job["yft_name"]])
+    asset_name = job.get("asset_name") or job.get("yft_name")
+    import_result = import_assets(source_dir, [asset_name])
     print(f"Import result: {import_result}")
 
     bind_extracted_textures(job)
-    wheels_created = mirror_missing_wheels()
+    wheels_created = mirror_missing_wheels() if job.get("asset_kind", "vehicle") == "vehicle" else 0
     print(f"Wheel mirror created: {wheels_created}")
 
     objects = mesh_objects()

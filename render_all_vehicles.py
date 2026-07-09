@@ -22,12 +22,14 @@ ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 @dataclass(frozen=True)
 class VehicleJob:
     model: str
+    asset_kind: str
     source_dir: Path
-    yft_name: str
+    asset_name: str
     ytd_names: tuple[str, ...]
     shared_ytd_paths: tuple[Path, ...]
     texture_dir: Path
     texture_log_path: Path
+    texture_bind_report_path: Path
     output_path: Path
     final_output_path: Path
     log_path: Path
@@ -70,15 +72,27 @@ def default_workers() -> int:
     return max(1, min(4, cpu // 2 or 1))
 
 
-def clean_model_name(yft: Path) -> str:
-    name = yft.stem
-    if name.lower().endswith("_hi"):
+def clean_model_name(asset: Path) -> str:
+    name = asset.stem
+    lower = name.lower()
+    if lower.endswith("_hi") or lower.endswith("+hi"):
         return name[:-3]
     return name
 
 
+def path_is_generated_output(path: Path) -> bool:
+    generated = {"_vehicle_renders", "_work", "_archive_unpacked", "_rpf_unpacked"}
+    return any(part.lower() in generated for part in path.parts)
+
+
+def selected_model_matches(asset: Path, selected_models: set[str] | None) -> bool:
+    if not selected_models:
+        return True
+    return bool({asset.stem.lower(), clean_model_name(asset).lower()} & selected_models)
+
+
 def scan_vehicle_yfts(root: Path, selected_models: set[str] | None) -> list[Path]:
-    all_yfts = [p for p in root.rglob("*.yft") if p.is_file()]
+    all_yfts = [p for p in root.rglob("*.yft") if p.is_file() and not path_is_generated_output(p)]
     by_model: dict[str, dict[str, Path]] = {}
     for yft in all_yfts:
         model = clean_model_name(yft)
@@ -94,6 +108,135 @@ def scan_vehicle_yfts(root: Path, selected_models: set[str] | None) -> list[Path
     for item in by_model.values():
         result.append(item.get("hi") or item["base"])
     return sorted(result, key=lambda p: (str(p.parent).lower(), clean_model_name(p).lower()))
+
+
+def scan_hi_preferred_assets(root: Path, extension: str, selected_models: set[str] | None) -> list[Path]:
+    all_assets = [p for p in root.rglob(f"*{extension}") if p.is_file() and not path_is_generated_output(p)]
+    by_model: dict[str, dict[str, Path]] = {}
+    for asset in all_assets:
+        if not selected_model_matches(asset, selected_models):
+            continue
+        model = clean_model_name(asset)
+        slot = by_model.setdefault(model.lower(), {})
+        lower = asset.stem.lower()
+        if lower.endswith("_hi") or lower.endswith("+hi"):
+            slot["hi"] = asset
+        else:
+            slot["base"] = asset
+
+    result = []
+    for item in by_model.values():
+        result.append(item.get("hi") or item["base"])
+    return sorted(result, key=lambda p: (str(p.parent).lower(), clean_model_name(p).lower()))
+
+
+def scan_plain_assets(root: Path, extension: str, selected_models: set[str] | None) -> list[Path]:
+    result = []
+    for asset in root.rglob(f"*{extension}"):
+        if asset.is_file() and not path_is_generated_output(asset) and selected_model_matches(asset, selected_models):
+            result.append(asset)
+    return sorted(result, key=lambda p: (str(p.parent).lower(), clean_model_name(p).lower()))
+
+
+def parse_asset_types(spec: str) -> set[str]:
+    all_types = {"vehicle", "drawable", "drawable-dict", "map"}
+    aliases = {
+        "all": all_types,
+        "vehicles": {"vehicle"},
+        "vehicle": {"vehicle"},
+        "yft": {"vehicle"},
+        "props": {"drawable"},
+        "prop": {"drawable"},
+        "weapons": {"drawable"},
+        "weapon": {"drawable"},
+        "accessories": {"drawable"},
+        "accessory": {"drawable"},
+        "drawable": {"drawable"},
+        "ydr": {"drawable"},
+        "drawable-dict": {"drawable-dict"},
+        "ydd": {"drawable-dict"},
+        "maps": {"map"},
+        "map": {"map"},
+        "ymap": {"map"},
+    }
+    selected: set[str] = set()
+    for raw in spec.split(","):
+        key = raw.strip().lower()
+        if not key:
+            continue
+        if key not in aliases:
+            raise ValueError(f"Unknown asset type: {raw}")
+        selected.update(aliases[key])
+    return selected or all_types
+
+
+def scan_render_assets(root: Path, selected_models: set[str] | None, asset_types: set[str]) -> list[tuple[Path, str]]:
+    assets: list[tuple[Path, str]] = []
+    if "vehicle" in asset_types:
+        assets.extend((path, "vehicle") for path in scan_vehicle_yfts(root, selected_models))
+    if "drawable" in asset_types:
+        assets.extend((path, "drawable") for path in scan_hi_preferred_assets(root, ".ydr", selected_models))
+    if "drawable-dict" in asset_types:
+        assets.extend((path, "drawable-dict") for path in scan_plain_assets(root, ".ydd", selected_models))
+    if "map" in asset_types:
+        assets.extend((path, "map") for path in scan_plain_assets(root, ".ymap", selected_models))
+    return assets
+
+
+def requested_asset_type_keys(spec: str) -> set[str]:
+    return {raw.strip().lower() for raw in spec.split(",") if raw.strip()}
+
+
+def classify_drawable_asset(asset: Path, asset_kind: str, requested_spec: str) -> str:
+    if asset_kind != "drawable":
+        return asset_kind
+
+    requested = requested_asset_type_keys(requested_spec)
+    stem = asset.stem.lower()
+    path_text = str(asset).replace("\\", "/").lower()
+    if stem.startswith(("w_", "weapon_")) or "/wea" in path_text or "weapon" in path_text:
+        return "weapon"
+    if any(hint in path_text for hint in ("accessory", "accessories", "shipin", "labubu", "backpack", "bag")):
+        return "accessory"
+    if "prop" in path_text:
+        return "prop"
+
+    semantic = requested & {"weapon", "weapons", "accessory", "accessories", "prop", "props"}
+    if len(semantic) == 1:
+        value = next(iter(semantic))
+        if value.endswith("s"):
+            value = value[:-1]
+        return value
+    return asset_kind
+
+
+def requested_drawable_filter(spec: str) -> set[str] | None:
+    requested = requested_asset_type_keys(spec)
+    if requested & {"all", "drawable", "ydr"}:
+        return None
+    mapping = {
+        "weapon": "weapon",
+        "weapons": "weapon",
+        "accessory": "accessory",
+        "accessories": "accessory",
+        "prop": "prop",
+        "props": "prop",
+    }
+    selected = {mapping[key] for key in requested if key in mapping}
+    return selected or None
+
+
+def filter_classified_assets(assets: list[tuple[Path, str]], requested_spec: str) -> list[tuple[Path, str]]:
+    drawable_filter = requested_drawable_filter(requested_spec)
+    if drawable_filter is None:
+        return assets
+    filtered = []
+    for asset, asset_kind in assets:
+        if asset.suffix.lower() != ".ydr":
+            filtered.append((asset, asset_kind))
+        elif asset_kind in drawable_filter:
+            filtered.append((asset, asset_kind))
+    return filtered
 
 
 def matching_ytds(source_dir: Path, model: str, mode: str) -> list[str]:
@@ -304,11 +447,27 @@ def convert_dds_to_png(dds_files: list[Path], output_dir: Path, texconv: Path, l
     if not dds_files:
         return 0
     before = {p.name.lower() for p in output_dir.glob("*.png")}
+    skipped: list[Path] = []
     for batch in chunked(dds_files, 80):
         cmd = [str(texconv), "-ft", "png", "-y", "-o", str(output_dir), *[str(p) for p in batch]]
         result = run_logged(cmd, texconv.parent, log)
-        if result.returncode != 0:
-            raise RuntimeError(f"texconv failed rc={result.returncode}")
+        if result.returncode == 0:
+            continue
+
+        log.write("texconv batch failed; retrying files one by one and skipping corrupt DDS files.\n")
+        log.flush()
+        for dds in batch:
+            expected_png = output_dir / f"{dds.stem}.png"
+            if expected_png.exists():
+                continue
+            single_cmd = [str(texconv), "-ft", "png", "-y", "-o", str(output_dir), str(dds)]
+            single = run_logged(single_cmd, texconv.parent, log)
+            if single.returncode != 0:
+                skipped.append(dds)
+                log.write(f"texconv skipped corrupt/unreadable dds: {dds}\n")
+                log.flush()
+    if skipped:
+        print(f"[textures] skipped corrupt DDS: {len(skipped)}")
     after = {p.name.lower() for p in output_dir.glob("*.png")}
     return len(after - before)
 
@@ -423,10 +582,20 @@ def unpack_rpfs(scan_roots: list[Path], work_dir: Path, rpf_tool: Path) -> list[
     return roots
 
 
-def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Path) -> VehicleJob:
-    model = clean_model_name(yft)
-    source_dir = yft.parent.resolve()
+def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir: Path, out_dir: Path) -> VehicleJob:
+    model = clean_model_name(asset)
+    source_dir = asset.parent.resolve()
     ytd_names = tuple(matching_ytds(source_dir, model, args.ytd_mode))
+    exposure = args.exposure
+    world_strength = args.world_strength
+    light_scale = args.light_scale
+    if args.cutout and asset_kind != "vehicle":
+        if args.exposure_auto:
+            exposure = 0.05
+        if args.world_strength_auto:
+            world_strength = 0.48
+        if args.light_scale_auto:
+            light_scale = 1.05
     if args.cutout:
         output_path = out_dir / "_alpha" / f"{model}.png"
         green_screen_path = out_dir / "_greenscreen" / f"{model}.png"
@@ -442,16 +611,20 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
     log_path = logs_dir / f"{model}.log"
     texture_dir = out_dir / "_textures" / model
     texture_log_path = logs_dir / f"{model}.textures.log"
+    texture_bind_report_path = logs_dir / f"{model}.textures.bind.json"
     job_path = jobs_dir / f"{model}.json"
 
     data = {
         "model": model,
+        "asset_kind": asset_kind,
         "source_dir": str(source_dir),
-        "yft_name": yft.name,
+        "asset_name": asset.name,
+        "yft_name": asset.name,
         "ytd_names": list(ytd_names),
         "shared_ytd_paths": [str(p) for p in args.shared_ytd_paths],
         "texture_dir": str(texture_dir.resolve()),
         "texture_manifest_path": str((texture_dir / "_texture_manifest.json").resolve()),
+        "texture_bind_report_path": str(texture_bind_report_path.resolve()),
         "output_path": str(output_path.resolve()),
         "green_screen_path": str(green_screen_path.resolve()) if green_screen_path else "",
         "cutout_path": str(final_output_path.resolve()) if args.cutout else "",
@@ -464,10 +637,12 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
         "engine": args.engine,
         "yaw": args.yaw,
         "elevation": args.elevation,
-        "exposure": args.exposure,
-        "world_strength": args.world_strength,
-        "light_scale": args.light_scale,
+        "exposure": exposure,
+        "world_strength": world_strength,
+        "light_scale": light_scale,
         "floor_clearance": args.floor_gap,
+        "model_tone": args.model_tone,
+        "special_lights": not args.no_special_lights,
         "orthographic": not args.perspective,
         "sollumz_path": str(Path(args.sollumz).resolve()) if args.sollumz else "",
         "blender_user_config": str(Path(args.blender_user_config).resolve()) if args.blender_user_config else "",
@@ -478,12 +653,14 @@ def write_job_file(args, yft: Path, jobs_dir: Path, logs_dir: Path, out_dir: Pat
     job_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return VehicleJob(
         model,
+        asset_kind,
         source_dir,
-        yft.name,
+        asset.name,
         ytd_names,
         tuple(args.shared_ytd_paths),
         texture_dir,
         texture_log_path,
+        texture_bind_report_path,
         output_path,
         final_output_path,
         log_path,
@@ -549,6 +726,82 @@ def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, flo
     return job.model, rc, elapsed
 
 
+def read_json_object(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_texture_summary_report(jobs: list[VehicleJob], out_dir: Path) -> int:
+    items = []
+    issue_count = 0
+    for job in jobs:
+        bind_report = read_json_object(job.texture_bind_report_path)
+        manifest = read_json_object(job.texture_dir / "_texture_manifest.json")
+        local_textures = manifest.get("local", []) if isinstance(manifest.get("local", []), list) else []
+        shared_textures = manifest.get("shared", []) if isinstance(manifest.get("shared", []), list) else []
+        missing = bind_report.get("missing", []) if isinstance(bind_report.get("missing", []), list) else []
+        item = {
+            "model": job.model,
+            "asset_kind": job.asset_kind,
+            "asset_name": job.asset_name,
+            "source_dir": str(job.source_dir),
+            "output": str(job.final_output_path),
+            "log": str(job.log_path),
+            "texture_log": str(job.texture_log_path),
+            "texture_bind_report": str(job.texture_bind_report_path),
+            "local_texture_count": len(local_textures),
+            "shared_texture_count": len(shared_textures),
+            "texture_file_count": int(bind_report.get("texture_files", 0) or 0),
+            "matched": int(bind_report.get("matched", 0) or 0),
+            "missing": sorted(str(name) for name in missing),
+            "livery_links": int(bind_report.get("livery_links", 0) or 0),
+            "generic_links": int(bind_report.get("generic_links", 0) or 0),
+            "part_links": int(bind_report.get("part_links", 0) or 0),
+            "status": "ok" if job.final_output_path.exists() else "missing_output",
+        }
+        item["has_texture_issue"] = bool(item["missing"]) or item["status"] != "ok"
+        if item["has_texture_issue"]:
+            issue_count += 1
+        items.append(item)
+
+    report = {
+        "jobs": len(jobs),
+        "issues": issue_count,
+        "items": items,
+    }
+    json_path = out_dir / "_texture_report.json"
+    txt_path = out_dir / "_texture_report.txt"
+    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    lines = ["Texture report", f"jobs={len(jobs)} issues={issue_count}", ""]
+    for item in items:
+        if not item["has_texture_issue"]:
+            continue
+        lines.append(
+            f"{item['model']} [{item['asset_kind']}] matched={item['matched']} "
+            f"missing={len(item['missing'])} local={item['local_texture_count']} "
+            f"shared={item['shared_texture_count']} generic={item['generic_links']} "
+            f"part={item['part_links']} status={item['status']}"
+        )
+        if item["missing"]:
+            preview = ", ".join(item["missing"][:32])
+            suffix = "..." if len(item["missing"]) > 32 else ""
+            lines.append(f"  missing: {preview}{suffix}")
+            if item["local_texture_count"] == 0:
+                lines.append("  note: no local YTD textures were extracted; add the correct .ytd next to the model or pass --shared-ytd.")
+        lines.append(f"  log: {item['log']}")
+        lines.append("")
+    if issue_count == 0:
+        lines.append("No missing material textures were reported.")
+    txt_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return issue_count
+
+
 def run_green_key(blender: Path, args) -> int:
     input_path = Path(args.key_green).resolve()
     if not input_path.exists():
@@ -580,19 +833,20 @@ def run_green_key(blender: Path, args) -> int:
 
 def apply_render_defaults(args) -> None:
     if args.exposure is None:
-        args.exposure = 0.35 if args.cutout else -0.2
+        args.exposure = 0.16 if args.cutout else -0.2
     if args.world_strength is None:
-        args.world_strength = 0.66 if args.cutout else 0.45
+        args.world_strength = 0.56 if args.cutout else 0.45
     if args.light_scale is None:
-        args.light_scale = 1.45 if args.cutout else 0.72
+        args.light_scale = 1.18 if args.cutout else 0.72
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Batch render GTA/FiveM vehicles with Blender and Sollumz.")
-    parser.add_argument("input", nargs="?", help="Folder containing archives or extracted FiveM vehicle resources.")
+    parser = argparse.ArgumentParser(description="Batch render GTA/FiveM vehicles, props, weapons, accessories and maps with Blender and Sollumz.")
+    parser.add_argument("input", nargs="?", help="Folder containing archives or extracted FiveM/GTA resources.")
     parser.add_argument("--out", default="", help="Output folder. Default: <input>/_vehicle_renders")
     parser.add_argument("--workers", type=int, default=default_workers(), help="Parallel Blender process count.")
-    parser.add_argument("--model", action="append", default=[], help="Only render this model name. Can be repeated.")
+    parser.add_argument("--model", action="append", default=[], help="Only render this model/asset name. Can be repeated.")
+    parser.add_argument("--asset-types", default="all", help="Comma list: all,vehicle,drawable,drawable-dict,map,weapon,prop,accessory.")
     parser.add_argument("--blender", default="", help="Path to blender.exe. Otherwise BLENDER_EXE is used.")
     parser.add_argument("--sollumz", default="", help="Path to Sollumz addon folder if it is not installed.")
     parser.add_argument("--blender-user-config", default="", help="Optional isolated Blender user config folder.")
@@ -623,10 +877,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--floor-gap", type=float, default=0.12, help="Lower the floor below visible bounds to avoid wheel clipping.")
     parser.add_argument("--cutout", action="store_true", help="Render green screen and output transparent cropped PNG.")
+    parser.add_argument("--model-tone", choices=("gray", "white", "black"), default="gray", help="Fallback material tone when no color texture exists.")
+    parser.add_argument("--no-special-lights", action="store_true", help="Disable police/self-emissive material emission tuning.")
     parser.add_argument("--key-green", default="", help="Standalone green-screen PNG file/folder to key and crop.")
     parser.add_argument("--key-out", default="", help="Output file/folder for --key-green.")
     parser.add_argument("--key-threshold", type=int, default=70, help="Green key threshold, 0-255.")
-    parser.add_argument("--key-padding", type=int, default=12, help="Transparent cutout padding in pixels.")
+    parser.add_argument("--key-padding", type=int, default=0, help="Transparent cutout padding in pixels. Default 0 crops all empty transparent pixels.")
     parser.add_argument("--perspective", action="store_true", help="Use perspective camera instead of orthographic.")
     parser.add_argument("--ytd-mode", choices=("all", "match", "none"), default="all")
     parser.add_argument("--shared-ytd", action="append", default=[], help="Extra shared .ytd file or folder, for example exported vehshare.ytd.")
@@ -650,6 +906,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    args.exposure_auto = args.exposure is None
+    args.world_strength_auto = args.world_strength is None
+    args.light_scale_auto = args.light_scale is None
     apply_render_defaults(args)
     if args.key_green:
         blender = find_blender(args.blender)
@@ -714,30 +973,43 @@ def main(argv: list[str]) -> int:
             print("[rpf] RpfTools.exe not found; skip .rpf unpack")
 
     selected_models = {m.lower() for m in args.model} if args.model else None
-    yfts: list[Path] = []
+    asset_types = parse_asset_types(args.asset_types)
+    assets: list[tuple[Path, str]] = []
     for root in scan_roots:
-        yfts.extend(scan_vehicle_yfts(root, selected_models))
+        assets.extend(scan_render_assets(root, selected_models, asset_types))
 
-    # Deduplicate by model name and source file path.
-    seen: set[tuple[str, str]] = set()
-    unique_yfts = []
-    for yft in yfts:
-        key = (clean_model_name(yft).lower(), str(yft.resolve()).lower())
+    # Deduplicate by type, model name and source file path.
+    seen: set[tuple[str, str, str]] = set()
+    unique_assets: list[tuple[Path, str]] = []
+    for asset, asset_kind in assets:
+        key = (asset_kind, clean_model_name(asset).lower(), str(asset.resolve()).lower())
         if key not in seen:
             seen.add(key)
-            unique_yfts.append(yft)
+            unique_assets.append((asset, asset_kind))
 
-    if not unique_yfts:
-        print("No .yft vehicles found.")
+    if not unique_assets:
+        print("No renderable assets found (.yft/.ydr/.ydd/.ymap).")
         return 1
 
-    jobs = [write_job_file(args, yft, jobs_dir, logs_dir, out_dir) for yft in unique_yfts]
+    unique_assets = [
+        (asset, classify_drawable_asset(asset, asset_kind, args.asset_types))
+        for asset, asset_kind in unique_assets
+    ]
+    unique_assets = filter_classified_assets(unique_assets, args.asset_types)
+    if not unique_assets:
+        print(f"No assets matched --asset-types {args.asset_types!r} after classification.")
+        return 1
+
+    jobs = [write_job_file(args, asset, asset_kind, jobs_dir, logs_dir, out_dir) for asset, asset_kind in unique_assets]
     workers = max(1, args.workers)
 
     print(f"Blender: {blender}")
     print(f"Input: {input_dir}")
     print(f"Output: {out_dir}")
-    print(f"Vehicles: {len(jobs)}")
+    print(f"Assets: {len(jobs)}")
+    print(f"Requested asset types: {args.asset_types}")
+    print(f"Scanned asset groups: {','.join(sorted(asset_types))}")
+    print(f"Model tone: {args.model_tone}")
     print(f"Workers: {workers}")
     if args.shared_ytd_paths:
         print(f"Shared YTD: {len(args.shared_ytd_paths)}")
@@ -754,6 +1026,15 @@ def main(argv: list[str]) -> int:
             else:
                 print(f"[fail] {model} rc={rc} {elapsed:.1f}s")
                 failures.append((model, rc))
+
+    texture_issue_count = 0
+    if not args.skip_textures:
+        texture_issue_count = write_texture_summary_report(jobs, out_dir)
+        texture_report_path = out_dir / "_texture_report.txt"
+        if texture_issue_count:
+            print(f"[textures] issues={texture_issue_count}; report={texture_report_path}")
+        else:
+            print(f"[textures] report={texture_report_path}")
 
     if args.keep_work and temp_root.exists():
         kept = out_dir / "_work"
