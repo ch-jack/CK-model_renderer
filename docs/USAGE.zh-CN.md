@@ -18,9 +18,9 @@
 
 ## 2. 效果样图
 
-### 车辆示例
+### 模型示例
 
-| 模型 | 默认灰模 | 灰模 PNG | 黑模 | 黑模 PNG | 白模 | 白模 PNG | 绿幕 |
+| 模型 | 灰模 | 灰模 PNG | 默认黑模 | 黑模 PNG | 白模 | 白模 PNG | 绿幕 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 16MANDBS111 | ![16MANDBS111 gray model](images/vehicle_16MANDBS111_gray_model.png) | ![16MANDBS111 gray png](images/vehicle_16MANDBS111_gray_png.png) | ![16MANDBS111 black model](images/vehicle_16MANDBS111_black_model.png) | ![16MANDBS111 black png](images/vehicle_16MANDBS111_black_png.png) | ![16MANDBS111 white model](images/vehicle_16MANDBS111_white_model.png) | ![16MANDBS111 white png](images/vehicle_16MANDBS111_white_png.png) | ![16MANDBS111 greenscreen](images/vehicle_16MANDBS111_greenscreen.png) |
 | fordc72 | ![fordc72 gray model](images/vehicle_fordc72_gray_model.png) | ![fordc72 gray png](images/vehicle_fordc72_gray_png.png) | ![fordc72 black model](images/vehicle_fordc72_black_model.png) | ![fordc72 black png](images/vehicle_fordc72_black_png.png) | ![fordc72 white model](images/vehicle_fordc72_white_model.png) | ![fordc72 white png](images/vehicle_fordc72_white_png.png) | ![fordc72 greenscreen](images/vehicle_fordc72_greenscreen.png) |
@@ -46,7 +46,7 @@
 
 ## 3. 推荐命令
 
-直接把文件夹交给入口，默认扫描全部类型并输出透明裁切图：
+直接把文件夹交给入口，默认扫描全部类型并使用黑模输出透明裁切图：
 
 ```cmd
 render_folder.cmd "D:\fivem\TestVeh"
@@ -80,7 +80,7 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --m
 
 ```text
 all            全部支持资源
-vehicle        .yft 车辆
+vehicle        .yft 模型
 weapon         武器 .ydr
 accessory      饰品/背包/挂件 .ydr
 prop           普通物品 .ydr
@@ -110,7 +110,7 @@ _vehicle_renders\model.png
 ```
 需要设定裁切 PNG 的最小分辨率时使用 `--cutout-width` 和 `--cutout-height`；任一边不足会等比放大，不会缩小已有大图。
 
-车辆、武器、饰品及其他模型统一按实际投影边界自适应取景，只保留防止零尺寸的极小下限。
+所有模型统一按实际投影边界自适应取景，只保留防止零尺寸的极小下限。
 
 同时保留：
 
@@ -155,14 +155,14 @@ note: no local YTD textures were extracted; add the correct .ytd next to the mod
 --cutout-width 1920 --cutout-height 1080
 --yaw 135 --elevation 26
 --floor-gap 0.2
+--model-tone black
 --model-tone gray
 --model-tone white
---model-tone black
 --no-special-lights
 --key-padding 0
 ```
 
-`--model-tone gray/white/black` 都只调整车辆原生主色、副色、珠光和明确的车漆材质，不覆盖或暗化漫反射贴图。玻璃、灯光、轮胎、轮毂、金属、碳纤维、塑料、内饰和贴花不参与改色。
+`--model-tone black` 是默认值；`gray/white/black` 都只调整模型原生主色、副色、珠光和明确的车漆材质，不覆盖或暗化漫反射贴图。玻璃、灯光、轮胎、轮毂、金属、碳纤维、塑料、内饰和贴花不参与改色。
 
 Cycles 渲染前会把 Sollumz 数值参数烘焙为标准 Blender 节点常量，已有 Base Color 上游贴图链不会被补图逻辑覆盖。武器材质若把 `_dpal` / palette / tint 调色板误接到 Base Color，会改用本地漫反射贴图（例如 `map.png`）；`_nm` / `_spec` 按 Non-Color 数据读取。
 
@@ -228,4 +228,4 @@ vehicle_renderer\
 D:\fivem\ck_free_toolbox\start_toolbox.cmd
 ```
 
-工具箱不使用后端服务。它在本机客户端里扫描载具、武器、饰品、道具等模型资源，启动 `render_all_vehicles.py`、读取日志并更新进度。第一页签是“模型自动截图”，渲染命令使用 `--asset-types all`；默认输入为 `D:\fivem\TestVeh`，默认输出为 `D:\fivem\TestVeh\_vehicle_renders`。
+工具箱不使用后端服务。它在本机客户端里扫描所有模型资源，启动 `render_all_vehicles.py`、读取日志并更新进度。第一页签是“模型自动截图”，渲染命令使用 `--asset-types all`；默认输入为 `D:\fivem\TestVeh`，默认输出为 `D:\fivem\TestVeh\_vehicle_renders`。

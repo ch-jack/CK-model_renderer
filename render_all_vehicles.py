@@ -846,7 +846,7 @@ def apply_render_defaults(args) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Batch render GTA/FiveM vehicles, props, weapons, accessories and maps with Blender and Sollumz.")
+    parser = argparse.ArgumentParser(description="Batch render GTA/FiveM models and maps with Blender and Sollumz.")
     parser.add_argument("input", nargs="?", help="Folder containing archives or extracted FiveM/GTA resources.")
     parser.add_argument("--out", default="", help="Output folder. Default: <input>/_vehicle_renders")
     parser.add_argument("--workers", type=int, default=default_workers(), help="Parallel Blender process count.")
@@ -885,8 +885,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-tone",
         choices=("gray", "white", "black"),
-        default="gray",
-        help="Vehicle paint tone. All tones change native paint layers without darkening appearance textures.",
+        default="black",
+        help="Model paint tone. All tones change native paint layers without darkening appearance textures.",
     )
     parser.add_argument("--no-special-lights", action="store_true", help="Disable police/self-emissive material emission tuning.")
     parser.add_argument("--key-green", default="", help="Standalone green-screen PNG file/folder to key and crop.")

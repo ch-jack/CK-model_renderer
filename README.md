@@ -1,17 +1,17 @@
-# Vehicle Renderer
+# Model Renderer
 
 作者：JACK
 联系方式：QQ 2518926462
 
 基于 Blender、Sollumz 和 CodeWalker 运行工具的 FiveM/GTA V 资源批量渲染器。指定一个资源目录后，工具会自动解包 `.zip` / `.rar` / `.7z` / `.rpf`，提取 `.ytd` 贴图，导入模型并输出 PNG 图片。
 
-支持车辆、武器、饰品、普通物品和地图资源。一个压缩包里有多个模型时，不传 `--model` 会把能导入的模型全部渲染出来；同名 `_hi` / `+hi` 高模会优先使用高模版本。
+支持所有模型，包括载具、武器、饰品、普通物品和地图资源。一个压缩包里有多个模型时，不传 `--model` 会把能导入的模型全部渲染出来；同名 `_hi` / `+hi` 高模会优先使用高模版本。
 
 ## 效果示例
 
-### 车辆示例
+### 模型示例
 
-| 模型 | 默认灰模 | 灰模 PNG | 黑模 | 黑模 PNG | 白模 | 白模 PNG | 绿幕 |
+| 模型 | 灰模 | 灰模 PNG | 默认黑模 | 黑模 PNG | 白模 | 白模 PNG | 绿幕 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 16MANDBS111 | ![16MANDBS111 gray model](docs/images/vehicle_16MANDBS111_gray_model.png) | ![16MANDBS111 gray png](docs/images/vehicle_16MANDBS111_gray_png.png) | ![16MANDBS111 black model](docs/images/vehicle_16MANDBS111_black_model.png) | ![16MANDBS111 black png](docs/images/vehicle_16MANDBS111_black_png.png) | ![16MANDBS111 white model](docs/images/vehicle_16MANDBS111_white_model.png) | ![16MANDBS111 white png](docs/images/vehicle_16MANDBS111_white_png.png) | ![16MANDBS111 greenscreen](docs/images/vehicle_16MANDBS111_greenscreen.png) |
 | fordc72 | ![fordc72 gray model](docs/images/vehicle_fordc72_gray_model.png) | ![fordc72 gray png](docs/images/vehicle_fordc72_gray_png.png) | ![fordc72 black model](docs/images/vehicle_fordc72_black_model.png) | ![fordc72 black png](docs/images/vehicle_fordc72_black_png.png) | ![fordc72 white model](docs/images/vehicle_fordc72_white_model.png) | ![fordc72 white png](docs/images/vehicle_fordc72_white_png.png) | ![fordc72 greenscreen](docs/images/vehicle_fordc72_greenscreen.png) |
@@ -40,18 +40,18 @@
 - 一个压缩包内多个模型会全部生成任务；`--model` 只用于手动过滤指定模型。
 - 自动提取本地 `.ytd` 和共享 `vehshare.ytd`，绑定材质贴图。
 - DDS 转 PNG 时遇到损坏 DDS 会跳过坏图，不会让整个模型失败。
-- Blender 后台导入模型、绑定贴图、补齐车辆缺失车轮、修正玻璃/车轮基础材质。
+- Blender 后台导入模型、绑定贴图、补齐模型缺失车轮、修正玻璃/车轮基础材质。
 - `--workers` 多进程并发渲染。
-- `--cutout` 输出透明 PNG，保留车漆高光、反光和半透明阴影。
+- `--cutout` 输出透明 PNG，保留模型高光、反光和半透明材质。
 - 不会创建额外点光源补光；明确的警灯/自发光材质只按原材质颜色写入 emission，不按名字强制改成红/橙。
 - 根目录透明 PNG 按 8 位 PNG 中所有非零 alpha 像素精确裁切，效果等同 Photoshop“裁切透明像素”；`_alpha` 仍保持 `--width/--height` 完整画布。
-- 车辆、武器、饰品及其他模型统一按实际投影边界自适应取景，不再按资源类型使用固定最小画幅。
+- 所有模型统一按实际投影边界自适应取景，不再按资源类型使用固定最小画幅。
 - 同时保留 `_greenscreen` 绿幕预览和 `_alpha` 归一化透明图。
 - 每次渲染生成 `_texture_report.txt/.json`，列出贴图命中和缺失情况。
 
 ## 快速使用
 
-直接把文件夹交给入口，默认扫描全部类型并输出透明裁切图：
+直接把文件夹交给入口，默认扫描全部类型并使用黑模输出透明裁切图：
 
 ```cmd
 render_folder.cmd "D:\fivem\TestVeh"
@@ -85,7 +85,7 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --m
 
 ```text
 all            全部支持资源
-vehicle        .yft 车辆
+vehicle        .yft 模型
 weapon         武器 .ydr
 accessory      饰品/背包/挂件 .ydr
 prop           普通物品 .ydr
@@ -136,14 +136,14 @@ note: no local YTD textures were extracted; add the correct .ytd next to the mod
 --width 1600 --height 1000
 --cutout-width 1920 --cutout-height 1080
 --yaw 135 --elevation 26
+--model-tone black
 --model-tone gray
 --model-tone white
---model-tone black
 --no-special-lights
 --key-padding 0
 ```
 
-`--model-tone gray/white/black` 都只调整车辆原生主色、副色、珠光和明确的车漆材质，不覆盖或暗化漫反射贴图。玻璃、灯光、轮胎、轮毂、金属、碳纤维、塑料、内饰和贴花不参与改色。
+`--model-tone black` 是默认值；`gray/white/black` 都只调整模型原生主色、副色、珠光和明确的车漆材质，不覆盖或暗化漫反射贴图。玻璃、灯光、轮胎、轮毂、金属、碳纤维、塑料、内饰和贴花不参与改色。
 
 Cycles 渲染前会把 Sollumz 数值参数烘焙为标准 Blender 节点常量，已有 Base Color 上游贴图链不会被补图逻辑覆盖。武器材质若把 `_dpal` / palette / tint 调色板误接到 Base Color，会改用本地漫反射贴图（例如 `map.png`）；`_nm` / `_spec` 按 Non-Color 数据读取。
 

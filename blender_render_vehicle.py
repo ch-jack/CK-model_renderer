@@ -52,9 +52,9 @@ COLOR_TEXTURE_EXCLUDE_HINTS = (
     "fabric",
     "leather",
 )
-PAINT_COLOR = (0.12, 0.13, 0.12, 1.0)
+PAINT_COLOR = (0.045, 0.045, 0.04, 1.0)
 CHROME_FALLBACK_COLOR = (0.26, 0.27, 0.26, 1.0)
-MODEL_TONE = "gray"
+MODEL_TONE = "black"
 ASSET_KIND = "vehicle"
 MODEL_TONE_PALETTE = {
     "gray": ((0.12, 0.13, 0.12, 1.0), (0.26, 0.27, 0.26, 1.0)),
@@ -69,8 +69,8 @@ MIN_PROJECTED_ORTHO_SCALE = 0.0001
 
 def apply_model_tone(job):
     global PAINT_COLOR, CHROME_FALLBACK_COLOR, MODEL_TONE, ASSET_KIND
-    tone = str(job.get("model_tone", "gray")).lower()
-    paint, chrome = MODEL_TONE_PALETTE.get(tone, MODEL_TONE_PALETTE["gray"])
+    tone = str(job.get("model_tone", "black")).lower()
+    paint, chrome = MODEL_TONE_PALETTE.get(tone, MODEL_TONE_PALETTE["black"])
     MODEL_TONE = tone
     ASSET_KIND = str(job.get("asset_kind", "vehicle")).lower()
     if ASSET_KIND != "vehicle" and tone == "gray":
@@ -793,8 +793,8 @@ def apply_vehicle_paint_tones():
         if updated:
             changed.append(material_obj.name)
     if changed:
-        print(f"Vehicle paint tone adjusted: {len(changed)}")
-        print("Vehicle paint tone materials: " + ", ".join(changed[:36]))
+        print(f"Model paint tone adjusted: {len(changed)}")
+        print("Model paint tone materials: " + ", ".join(changed[:36]))
     return len(changed)
 
 
@@ -1917,7 +1917,7 @@ def setup_scene(job, objects):
     dims = max_v - min_v
     max_dim = max(dims.x, dims.y, dims.z, 1.0)
 
-    # Move the vehicle center close to origin for stable camera math.
+    # Move the model center close to origin for stable camera math.
     offset = Vector((0, 0, 0)) - center
     for obj in objects:
         obj.location += offset
@@ -1928,7 +1928,8 @@ def setup_scene(job, objects):
     max_dim = max(dims.x, dims.y, dims.z, 1.0)
 
     floor_clearance = max(float(job.get("floor_clearance", 0.12)), 0.0)
-    add_studio_floor(min_v.z - floor_clearance, max_dim, cutout_mode)
+    if not cutout_mode:
+        add_studio_floor(min_v.z - floor_clearance, max_dim, cutout_mode)
 
     yaw = math.radians(float(job.get("yaw", -42.0)))
     elevation = math.radians(float(job.get("elevation", 26.0)))
