@@ -60,13 +60,13 @@ LEGACY_VEHICLE_BLACK_PAINT_COLOR = (0.30, 0.31, 0.30, 1.0)
 LEGACY_VEHICLE_BLACK_CHROME_COLOR = (0.26, 0.27, 0.26, 1.0)
 MODEL_TONE_PALETTE = {
     "gray": ((0.30, 0.31, 0.30, 1.0), (0.26, 0.27, 0.26, 1.0)),
-    "white": ((0.92, 0.93, 0.90, 1.0), (0.86, 0.87, 0.84, 1.0)),
+    "white": ((0.84, 0.85, 0.82, 1.0), (0.76, 0.77, 0.74, 1.0)),
     "black": ((0.018, 0.018, 0.017, 1.0), (0.018, 0.018, 0.017, 1.0)),
 }
 TEXTURED_BLACK_TINT = (0.045, 0.045, 0.04, 1.0)
 TEXTURED_MODEL_TONE_TINTS = {
     "gray": (0.34, 0.35, 0.33, 1.0),
-    "white": (0.96, 0.97, 0.94, 1.0),
+    "white": (0.88, 0.89, 0.86, 1.0),
     "black": TEXTURED_BLACK_TINT,
 }
 TEXTURED_MODEL_TONE_BLEND = {
@@ -726,12 +726,12 @@ def vehicle_model_tone_factor(name):
 
     if MODEL_TONE == "white":
         if "[primary]" in raw or "[secondary]" in raw:
-            return 0.96
+            return 0.78
         if key.isdigit() or key == "matte":
-            return 0.96
+            return 0.78
         if is_paint_like_material(name):
-            return 0.94
-        return 0.92
+            return 0.72
+        return 0.66
 
     if "[primary]" in raw or "[secondary]" in raw:
         return 0.84
@@ -1503,7 +1503,7 @@ def tune_window_materials():
         if not any(hint in name for hint in ("glass", "glasswindows", "windscreen", "window")):
             continue
         material_obj.use_nodes = True
-        material_obj.diffuse_color = (0.08, 0.11, 0.12, 0.24)
+        material_obj.diffuse_color = (0.16, 0.20, 0.22, 0.18)
         try:
             material_obj.blend_method = "BLEND"
             material_obj.use_screen_refraction = True
@@ -1519,14 +1519,14 @@ def tune_window_materials():
             if node.bl_idname != "ShaderNodeBsdfPrincipled":
                 continue
             if not base_color_has_upstream_texture(node) or material_has_fallback_texture(material_obj):
-                set_input(node, "Base Color", (0.08, 0.11, 0.12, 0.24))
-            force_input(node, "Alpha", 0.24)
+                set_input(node, "Base Color", (0.16, 0.20, 0.22, 0.18))
+            force_input(node, "Alpha", 0.18)
             set_input(node, "Roughness", 0.035)
             set_input(node, "Metallic", 0.0)
             set_first_input(node, ("Specular IOR Level", "Specular"), 0.86)
             set_input(node, "Coat Weight", 0.55)
             set_input(node, "Coat Roughness", 0.07)
-            set_input(node, "Transmission Weight", 0.16)
+            set_input(node, "Transmission Weight", 0.24)
             changed += 1
     return changed
 
