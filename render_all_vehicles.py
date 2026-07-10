@@ -890,7 +890,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Multiplier for all area lights. Default: 1.18 with --cutout, otherwise 0.72. Vehicle black cutout compatibility uses 1.45.",
     )
     parser.add_argument("--floor-gap", type=float, default=0.12, help="Lower the floor below visible bounds to avoid wheel clipping.")
-    parser.add_argument("--cutout", action="store_true", help="Render green screen and output a full-frame transparent PNG.")
+    parser.add_argument("--cutout", action="store_true", help="Render green screen, a cropped transparent PNG, and a full-frame _alpha PNG.")
     parser.add_argument(
         "--model-tone",
         choices=("gray", "white", "black"),
@@ -901,7 +901,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--key-green", default="", help="Standalone green-screen PNG file/folder to key and crop.")
     parser.add_argument("--key-out", default="", help="Output file/folder for --key-green.")
     parser.add_argument("--key-threshold", type=int, default=70, help="Green key threshold, 0-255.")
-    parser.add_argument("--key-padding", type=int, default=0, help="Padding for standalone --key-green cropping.")
+    parser.add_argument("--key-padding", type=int, default=0, help="Padding around cropped transparent PNGs, including standalone --key-green.")
     parser.add_argument("--perspective", action="store_true", help="Use perspective camera instead of orthographic.")
     parser.add_argument("--ytd-mode", choices=("all", "match", "none"), default="all")
     parser.add_argument("--shared-ytd", action="append", default=[], help="Extra shared .ytd file or folder, for example exported vehshare.ytd.")
@@ -1033,7 +1033,7 @@ def main(argv: list[str]) -> int:
     if args.shared_ytd_paths:
         print(f"Shared YTD: {len(args.shared_ytd_paths)}")
     if args.cutout:
-        print(f"Cutout: green-screen + full-frame transparent PNG ({args.width}x{args.height})")
+        print(f"Cutout: cropped transparent PNG + full-frame _alpha + green-screen ({args.width}x{args.height})")
 
     failures: list[tuple[str, int]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:

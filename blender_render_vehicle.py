@@ -52,20 +52,21 @@ COLOR_TEXTURE_EXCLUDE_HINTS = (
     "fabric",
     "leather",
 )
-PAINT_COLOR = (0.30, 0.31, 0.30, 1.0)
+PAINT_COLOR = (0.12, 0.13, 0.12, 1.0)
 CHROME_FALLBACK_COLOR = (0.26, 0.27, 0.26, 1.0)
 MODEL_TONE = "gray"
 ASSET_KIND = "vehicle"
 LEGACY_VEHICLE_BLACK_PAINT_COLOR = (0.30, 0.31, 0.30, 1.0)
 LEGACY_VEHICLE_BLACK_CHROME_COLOR = (0.26, 0.27, 0.26, 1.0)
 MODEL_TONE_PALETTE = {
-    "gray": ((0.30, 0.31, 0.30, 1.0), (0.26, 0.27, 0.26, 1.0)),
+    "gray": ((0.12, 0.13, 0.12, 1.0), (0.26, 0.27, 0.26, 1.0)),
     "white": ((0.62, 0.64, 0.61, 1.0), (0.26, 0.27, 0.26, 1.0)),
     "black": ((0.045, 0.045, 0.04, 1.0), (0.26, 0.27, 0.26, 1.0)),
 }
 VEHICLE_BODY_PAINT_LAYERS = {1, 2, 3}
 TEXTURED_BLACK_TINT = (0.045, 0.045, 0.04, 1.0)
 GREEN_SCREEN_COLOR = (0.0, 1.0, 0.0)
+CROP_ALPHA_THRESHOLD = 0.15
 
 
 def use_legacy_vehicle_black_cutout():
@@ -242,7 +243,7 @@ def node_texture_candidates(node, material):
 
 def is_non_color_node(node, path):
     combined = f"{node.name} {getattr(node, 'label', '')} {path.stem}".lower()
-    return any(hint in combined for hint in NON_COLOR_HINTS)
+    return is_non_color_texture_name(path.stem) or any(hint in combined for hint in NON_COLOR_HINTS)
 
 
 def set_image_color_space(image, is_data):
@@ -603,6 +604,25 @@ def base_color_has_texture(node):
     return False
 
 
+def base_color_uses_palette_texture(node):
+    socket = node.inputs.get("Base Color")
+    if not socket or not socket.is_linked:
+        return False
+    found = False
+    for link in socket.links:
+        source = link.from_node
+        if not source or source.bl_idname != "ShaderNodeTexImage":
+            return False
+        image = getattr(source, "image", None)
+        if not image:
+            continue
+        found = True
+        key = normalized_texture_name(image.name)
+        if not any(hint in key for hint in ("dpal", "palette", "tint")):
+            return False
+    return found
+
+
 def is_light_neutral_color(color):
     try:
         r, g, b = color[:3]
@@ -789,6 +809,36 @@ def apply_vehicle_paint_tones():
     return len(changed)
 
 
+def bake_sollumz_shader_parameters():
+    baked_links = 0
+    baked_materials = set()
+    for material_obj in bpy.data.materials:
+        if not material_obj.node_tree:
+            continue
+        links = material_obj.node_tree.links
+        for node in material_obj.node_tree.nodes:
+            if node.bl_idname != "SOLLUMZ_NT_SHADER_Parameter":
+                continue
+            for output in node.outputs:
+                try:
+                    value = float(node.get(output.name))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                for link in list(output.links):
+                    target = link.to_socket
+                    try:
+                        target.default_value = value
+                    except Exception:
+                        continue
+                    links.remove(link)
+                    baked_links += 1
+                    baked_materials.add(material_obj.name)
+    if baked_links:
+        print(f"Sollumz shader parameters baked: {baked_links} links in {len(baked_materials)} materials")
+        print("Sollumz parameter materials: " + ", ".join(sorted(baked_materials)[:36]))
+    return baked_links
+
+
 def vehicle_black_texture_tone_factor(name):
     if not use_legacy_vehicle_black_cutout():
         return 0.0
@@ -873,7 +923,7 @@ def is_non_color_texture_name(name):
     key = normalized_texture_name(name)
     if any(hint in key for hint in NON_COLOR_HINTS):
         return True
-    return key.endswith(("_s", "_n"))
+    return key.endswith(("_s", "_n", "_nm", "_nrm"))
 
 
 def material_texture_match_score(material_name, path, local_texture_names):
@@ -974,6 +1024,12 @@ def generic_asset_texture_score(path, local_texture_names):
     score = size
     if any(hint in key for hint in ("basecolor", "diffuse", "albedo", "color")) or key.endswith(("_d", "_diff")):
         score += 10_000_000
+    if key in {"map", "diffuse", "albedo", "basecolor", "base_color"}:
+        score += 14_000_000
+        if any(f"{key}{suffix}" in local_texture_names for suffix in ("_n", "_nm", "_nrm", "_normal")):
+            score += 3_000_000
+        if any(f"{key}{suffix}" in local_texture_names for suffix in ("_s", "_spec", "_specular")):
+            score += 3_000_000
     if key.startswith(("w_", "weapon_")):
         score += 5_000_000
     if key.endswith("_d") or key.endswith("_diff"):
@@ -1016,7 +1072,7 @@ def bind_generic_asset_texture(texture_index, texture_manifest, job):
         for node in material_obj.node_tree.nodes:
             if node.bl_idname != "ShaderNodeBsdfPrincipled":
                 continue
-            if base_color_has_upstream_texture(node):
+            if base_color_has_upstream_texture(node) and not base_color_uses_palette_texture(node):
                 continue
             if link_image_to_base_color(material_obj, node, image, texture_path.stem):
                 linked += 1
@@ -1056,9 +1112,7 @@ def bind_untextured_materials(texture_index, texture_manifest):
         for node in material_obj.node_tree.nodes:
             if node.bl_idname != "ShaderNodeBsdfPrincipled":
                 continue
-            if base_color_has_texture(node):
-                continue
-            if material_semantic(material_obj.name) == "light" and base_color_has_upstream_texture(node):
+            if base_color_has_upstream_texture(node):
                 continue
             if image is None:
                 image = bpy.data.images.load(str(texture_path), check_existing=True)
@@ -1806,7 +1860,7 @@ def bind_extracted_textures(job):
     part_links = bind_untextured_materials(texture_index, texture_manifest)
     window_tunes = tune_window_materials()
     if use_legacy_vehicle_black_cutout():
-        paint_tones = 0
+        paint_tones = apply_vehicle_paint_tones()
         black_texture_tones = apply_vehicle_black_texture_tones()
         surface_tunes = tune_legacy_vehicle_black_semantic_materials()
     else:
@@ -2004,11 +2058,11 @@ def center_camera_on_projection(objects, camera):
     bpy.context.view_layer.update()
 
 
-def projected_ortho_scale(objects, camera, aspect, margin=1.28):
+def projected_ortho_scale(objects, camera, aspect, margin=1.28, minimum=1.0):
     min_x, max_x, min_y, max_y = projected_bounds(objects, camera)
     width = max_x - min_x
     height = max_y - min_y
-    return max(height, width / max(aspect, 0.01), 1.0) * margin
+    return max(height, width / max(aspect, 0.01), minimum) * margin
 
 
 def setup_scene(job, objects):
@@ -2054,7 +2108,8 @@ def setup_scene(job, objects):
     if bool(job.get("orthographic", True)):
         camera.data.type = "ORTHO"
         aspect = float(job.get("width", 1600)) / max(float(job.get("height", 1000)), 1.0)
-        camera.data.ortho_scale = projected_ortho_scale(objects, camera, aspect, margin=1.85)
+        minimum_scale = 1.0 if job.get("asset_kind", "vehicle") == "vehicle" else 0.05
+        camera.data.ortho_scale = projected_ortho_scale(objects, camera, aspect, margin=1.85, minimum=minimum_scale)
     else:
         camera.data.type = "PERSP"
         camera.data.lens = 70
@@ -2289,12 +2344,12 @@ def save_green_preview_and_cutout(alpha_path, green_path, cutout_path, padding=0
             idx = (y * width + x) * 4
             r, g, b, a = pixels[idx : idx + 4]
             a = normalize_alpha(a, background_alpha)
-            if a > 0.01:
+            if a > CROP_ALPHA_THRESHOLD:
                 min_x = min(min_x, x)
                 min_y = min(min_y, y)
                 max_x = max(max_x, x)
                 max_y = max(max_y, y)
-            else:
+            if a <= 0.01:
                 r = g = b = 0.0
             normalized_pixels[idx : idx + 4] = [r, g, b, a]
             green_pixels[idx : idx + 4] = [
@@ -2305,22 +2360,23 @@ def save_green_preview_and_cutout(alpha_path, green_path, cutout_path, padding=0
             ]
 
     save_image(green_path, width, height, green_pixels, "vehicle_renderer_green_preview")
+    bpy.data.images.remove(image)
+    save_image(alpha_path, width, height, normalized_pixels, "vehicle_renderer_full_frame_alpha")
 
     if not crop:
-        save_image(
-            cutout_path,
-            width,
-            height,
-            normalized_pixels,
-            "vehicle_renderer_full_frame_alpha_cutout",
-        )
-        bpy.data.images.remove(image)
+        if cutout_path != alpha_path:
+            save_image(
+                cutout_path,
+                width,
+                height,
+                normalized_pixels,
+                "vehicle_renderer_full_frame_alpha_cutout",
+            )
         print(f"Full-frame alpha cutout: {alpha_path} -> {cutout_path} ({width}x{height})")
         return
 
     if max_x < min_x or max_y < min_y:
         save_image(cutout_path, 1, 1, [0.0, 0.0, 0.0, 0.0], "vehicle_renderer_empty_alpha_cutout")
-        bpy.data.images.remove(image)
         return
 
     min_x = max(min_x - padding, 0)
@@ -2342,7 +2398,6 @@ def save_green_preview_and_cutout(alpha_path, green_path, cutout_path, padding=0
             out_pixels[dst_idx : dst_idx + 4] = [r, g, b, a]
 
     save_image(cutout_path, out_w, out_h, out_pixels, "vehicle_renderer_alpha_cutout")
-    bpy.data.images.remove(image)
     print(f"Green preview: {alpha_path} -> {green_path}")
     print(f"Alpha cutout: {alpha_path} -> {cutout_path} (background_alpha={background_alpha:.4f})")
 
@@ -2389,6 +2444,7 @@ def main():
     print(f"Import result: {import_result}")
 
     bind_extracted_textures(job)
+    bake_sollumz_shader_parameters()
     wheels_created = mirror_missing_wheels() if job.get("asset_kind", "vehicle") == "vehicle" else 0
     print(f"Wheel mirror created: {wheels_created}")
 
@@ -2412,7 +2468,6 @@ def main():
             job.get("green_screen_path") or output_path,
             job["cutout_path"],
             int(job.get("key_padding", 12)),
-            crop=False,
         )
 
 

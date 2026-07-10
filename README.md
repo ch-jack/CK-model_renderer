@@ -44,8 +44,9 @@
 - `--workers` 多进程并发渲染。
 - `--cutout` 输出透明 PNG，保留车漆高光、反光和半透明阴影。
 - 不会创建额外点光源补光；明确的警灯/自发光材质只按原材质颜色写入 emission，不按名字强制改成红/橙。
-- 正常渲染的透明 PNG 保持 `--width/--height` 指定尺寸，模型不会因紧裁而贴边或显示不全。
-- 同时保留 `_greenscreen` 绿幕预览和 `_alpha` 原始透明图。
+- 根目录透明 PNG 会按实际 alpha 边界裁掉空白；`_alpha` 仍保持 `--width/--height` 完整画布，避免模型显示不全。
+- 武器、饰品等小模型按实际包围盒取景，避免固定 1 米画幅导致裁边后只剩低分辨率缩略图。
+- 同时保留 `_greenscreen` 绿幕预览和 `_alpha` 归一化透明图。
 - 每次渲染生成 `_texture_report.txt/.json`，列出贴图命中和缺失情况。
 
 ## 快速使用
@@ -93,8 +94,8 @@ map            .ymap
 
 ```text
 _vehicle_renders/
-  model.png                    # 最终完整画布透明 PNG
-  _alpha/model.png             # Blender 原始透明渲染
+  model.png                    # 最终裁边透明 PNG
+  _alpha/model.png             # 完整画布透明渲染
   _greenscreen/model.png       # 绿幕预览
   _textures/model/*.png        # 提取出来的贴图
   _jobs/model.json             # 单模型任务
@@ -135,9 +136,11 @@ note: no local YTD textures were extracted; add the correct .ytd next to the mod
 --key-padding 0
 ```
 
-`--model-tone gray/white` 只调整车辆原生主色、副色和珠光车漆层，不覆盖漫反射贴图；`black` 保留旧版黑模的纹理明暗乘算。玻璃、灯光、轮胎、轮毂、内饰和贴花不参与白/灰改色。
+`--model-tone gray/white` 只调整车辆原生主色、副色和珠光车漆层，不覆盖漫反射贴图；`black` 会先把原生主/副车漆设为黑色，再保留旧版外观纹理明暗乘算，避免不透明白色外观贴图残留，因此不是严格的“只改车漆”。玻璃、灯光、轮胎、轮毂、内饰和贴花不参与白/灰改色。
 
-`--key-padding` 只控制独立 `--key-green` 抠图的裁剪留边；正常 `--cutout` 渲染始终保留 `--width/--height` 完整画布。
+Cycles 渲染前会把 Sollumz 数值参数烘焙为标准 Blender 节点常量，已有 Base Color 上游贴图链不会被补图逻辑覆盖。武器材质若把 `_dpal` / palette / tint 调色板误接到 Base Color，会改用本地漫反射贴图（例如 `map.png`）；`_nm` / `_spec` 按 Non-Color 数据读取。
+
+`--key-padding` 控制透明 PNG 的裁剪留边；正常 `--cutout` 的根目录 PNG 会裁边，`_alpha` 始终保留 `--width/--height` 完整画布。
 
 ## 内置运行资源
 

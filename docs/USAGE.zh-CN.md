@@ -12,7 +12,7 @@
 3. 扫描 `.yft`、`.ydr`、`.ydd`、`.ymap`。
 4. 从本地 `.ytd` 和共享 `vehshare.ytd` 提取贴图。
 5. 调用 Blender/Sollumz 导入模型、绑定贴图并渲染。
-6. 输出白底预览、绿幕预览、完整画布透明 PNG 和贴图报告。
+6. 输出白底预览、绿幕预览、裁边透明 PNG、完整画布 `_alpha` PNG 和贴图报告。
 
 不传 `--model` 时，一个压缩包里有多少可导入模型就渲染多少个；传 `--model` 才会只渲染指定模型。
 
@@ -91,22 +91,24 @@ map            .ymap
 
 ## 5. 透明图输出
 
-`--cutout` 模式会输出保持 `--width/--height` 指定尺寸的透明 PNG：
+`--cutout` 模式的根目录 PNG 会按模型可见边界裁切：
 
 ```text
 _vehicle_renders\model.png
 ```
 
-正常渲染不会再按 alpha 边界紧裁。`--key-padding` 只用于独立 `--key-green` 抠图，需要给裁剪结果留边时可加：
+正常 `--cutout` 会按 alpha 边界裁掉根目录 PNG 的空白，完整画布保存在 `_alpha`。需要给裁剪结果留边时可加：
 
 ```powershell
 --key-padding 12
 ```
 
+武器、饰品等小模型按实际包围盒取景，不再使用固定 1 米最小画幅，因此裁边后仍保留足够像素。
+
 同时保留：
 
 ```text
-_vehicle_renders\_alpha\model.png        # 原始透明渲染
+_vehicle_renders\_alpha\model.png        # 完整画布透明渲染
 _vehicle_renders\_greenscreen\model.png  # 绿幕预览
 ```
 
@@ -152,7 +154,9 @@ note: no local YTD textures were extracted; add the correct .ytd next to the mod
 --key-padding 0
 ```
 
-`--model-tone gray/white` 只调整车辆原生主色、副色和珠光车漆层，不覆盖漫反射贴图；`black` 保留旧版黑模的纹理明暗乘算。玻璃、灯光、轮胎、轮毂、内饰和贴花不参与白/灰改色。
+`--model-tone gray/white` 只调整车辆原生主色、副色和珠光车漆层，不覆盖漫反射贴图；`black` 会先把原生主/副车漆设为黑色，再保留旧版外观纹理明暗乘算，避免不透明白色外观贴图残留，因此不是严格的“只改车漆”。玻璃、灯光、轮胎、轮毂、内饰和贴花不参与白/灰改色。
+
+Cycles 渲染前会把 Sollumz 数值参数烘焙为标准 Blender 节点常量，已有 Base Color 上游贴图链不会被补图逻辑覆盖。武器材质若把 `_dpal` / palette / tint 调色板误接到 Base Color，会改用本地漫反射贴图（例如 `map.png`）；`_nm` / `_spec` 按 Non-Color 数据读取。
 
 ## 8. 输出结构
 
@@ -182,7 +186,7 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 
 ### PNG 四周还有透明边
 
-正常 `--cutout` 会保留完整画布和透明边；独立 `--key-green` 才会按 `--key-padding` 裁剪。旧版本结果请使用 `--force` 重跑。
+正常 `--cutout` 的根目录 PNG 会裁掉透明空白，`_alpha` 保留完整画布；`--key-padding` 控制裁剪留边。旧版本结果请使用 `--force` 重跑。
 
 ### 模型导入失败
 
