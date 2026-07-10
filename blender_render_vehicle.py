@@ -60,20 +60,11 @@ LEGACY_VEHICLE_BLACK_PAINT_COLOR = (0.30, 0.31, 0.30, 1.0)
 LEGACY_VEHICLE_BLACK_CHROME_COLOR = (0.26, 0.27, 0.26, 1.0)
 MODEL_TONE_PALETTE = {
     "gray": ((0.30, 0.31, 0.30, 1.0), (0.26, 0.27, 0.26, 1.0)),
-    "white": ((0.84, 0.85, 0.82, 1.0), (0.76, 0.77, 0.74, 1.0)),
-    "black": ((0.018, 0.018, 0.017, 1.0), (0.018, 0.018, 0.017, 1.0)),
+    "white": ((0.62, 0.64, 0.61, 1.0), (0.26, 0.27, 0.26, 1.0)),
+    "black": ((0.045, 0.045, 0.04, 1.0), (0.26, 0.27, 0.26, 1.0)),
 }
+VEHICLE_BODY_PAINT_LAYERS = {1, 2, 3}
 TEXTURED_BLACK_TINT = (0.045, 0.045, 0.04, 1.0)
-TEXTURED_MODEL_TONE_TINTS = {
-    "gray": (0.34, 0.35, 0.33, 1.0),
-    "white": (0.88, 0.89, 0.86, 1.0),
-    "black": TEXTURED_BLACK_TINT,
-}
-TEXTURED_MODEL_TONE_BLEND = {
-    "gray": "MIX",
-    "white": "MIX",
-    "black": "MULTIPLY",
-}
 GREEN_SCREEN_COLOR = (0.0, 1.0, 0.0)
 
 
@@ -652,6 +643,8 @@ def protected_vehicle_model_tone_material(name):
     semantic = material_semantic(name)
     if semantic in {"glass", "light", "rubber", "brake", "leather", "fabric"}:
         return True
+    if MODEL_TONE != "black" and semantic in {"chrome", "metal", "carbon", "plastic"}:
+        return True
 
     protected = (
         "glass",
@@ -665,6 +658,15 @@ def protected_vehicle_model_tone_material(name):
         "lamp",
         "emiss",
         "emission",
+        "livery",
+        "decal",
+        "badge",
+        "logo",
+        "sign",
+        "stripe",
+        "sticker",
+        "letter",
+        "text",
         "interior",
         "seat",
         "sitz",
@@ -710,102 +712,139 @@ def protected_vehicle_model_tone_material(name):
 def vehicle_model_tone_factor(name):
     raw = str(name or "").lower()
     key = normalized_texture_name(name)
-    if ASSET_KIND != "vehicle" or MODEL_TONE not in TEXTURED_MODEL_TONE_TINTS:
+    if ASSET_KIND != "vehicle" or MODEL_TONE not in MODEL_TONE_PALETTE:
         return 0.0
     if not key or "pearlescent" in raw or protected_vehicle_model_tone_material(name):
         return 0.0
-
-    if MODEL_TONE == "black":
-        if "[primary]" in raw or "[secondary]" in raw:
-            return 0.97
-        if key.isdigit() or key == "matte":
-            return 0.97
-        if is_paint_like_material(name):
-            return 0.95
-        return 0.92
-
-    if MODEL_TONE == "white":
-        if "[primary]" in raw or "[secondary]" in raw:
-            return 0.78
-        if key.isdigit() or key == "matte":
-            return 0.78
-        if is_paint_like_material(name):
-            return 0.72
-        return 0.66
-
     if "[primary]" in raw or "[secondary]" in raw:
-        return 0.84
+        return 1.0
     if key.isdigit() or key == "matte":
-        return 0.84
+        return 1.0
     if is_paint_like_material(name):
-        return 0.80
-    return 0.74
+        return 1.0
+    if MODEL_TONE == "black":
+        return 1.0
+    return 0.0
 
 
-def neutral_vehicle_black_tone_factor(name):
-    return vehicle_model_tone_factor(name) if MODEL_TONE == "black" else 0.0
+def vehicle_paint_tone_color():
+    return MODEL_TONE_PALETTE.get(MODEL_TONE, MODEL_TONE_PALETTE["gray"])[0]
 
 
-def legacy_vehicle_black_tone_factor(name):
-    return vehicle_model_tone_factor(name) if MODEL_TONE == "black" else 0.0
+def vehicle_material_paint_layer(material_obj):
+    if not material_obj or not material_obj.node_tree:
+        return None
+    diffuse = material_obj.node_tree.nodes.get("matDiffuseColor")
+    if diffuse is None:
+        return None
+    try:
+        if abs(float(diffuse.get("X")) - 2.0) < 0.0001:
+            return int(round(float(diffuse.get("Y"))))
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
-def textured_black_tone_factor(material_obj):
-    return vehicle_model_tone_factor(material_obj.name)
-
-
-def should_tint_textured_paint(material_obj):
-    return textured_black_tone_factor(material_obj) > 0.0
-
-
-def tint_textured_paint(material_obj, bsdf):
-    factor = textured_black_tone_factor(material_obj)
-    if factor <= 0.0:
+def vehicle_material_uses_paint_tone(material_obj):
+    if ASSET_KIND != "vehicle" or not material_obj or not material_obj.node_tree:
         return False
-    base = bsdf.inputs.get("Base Color")
-    if not base or not base.is_linked or not base_color_has_upstream_texture(bsdf):
+    diffuse = material_obj.node_tree.nodes.get("matDiffuseColor")
+    if diffuse is None:
         return False
-    if any(link.from_node and link.from_node.name.startswith("vehicle_renderer_model_tone_") for link in base.links):
-        return False
-
-    links = list(base.links)
-    if not links:
-        return False
-    source_socket = links[0].from_socket
-    for link in links:
-        material_obj.node_tree.links.remove(link)
-
-    mix_node = material_obj.node_tree.nodes.new("ShaderNodeMixRGB")
-    mix_node.name = "vehicle_renderer_model_tone_texture"
-    mix_node.label = f"model tone {MODEL_TONE}"
-    mix_node.blend_type = TEXTURED_MODEL_TONE_BLEND.get(MODEL_TONE, "MIX")
-    mix_node.inputs["Fac"].default_value = factor
-    mix_node.inputs["Color2"].default_value = TEXTURED_MODEL_TONE_TINTS.get(MODEL_TONE, TEXTURED_MODEL_TONE_TINTS["gray"])
-    material_obj.node_tree.links.new(source_socket, mix_node.inputs["Color1"])
-    material_obj.node_tree.links.new(mix_node.outputs["Color"], base)
-    return True
+    paint_layer = vehicle_material_paint_layer(material_obj)
+    if paint_layer is not None:
+        return paint_layer in VEHICLE_BODY_PAINT_LAYERS
+    return vehicle_model_tone_factor(material_obj.name) > 0.0
 
 
-def tint_textured_paint_materials():
-    if ASSET_KIND != "vehicle" or MODEL_TONE not in TEXTURED_MODEL_TONE_TINTS:
+def apply_vehicle_paint_tones():
+    if ASSET_KIND != "vehicle" or MODEL_TONE not in MODEL_TONE_PALETTE:
         return 0
-    tinted = 0
-    names = []
+    color = vehicle_paint_tone_color()
+    changed = []
+    for material_obj in bpy.data.materials:
+        if not vehicle_material_uses_paint_tone(material_obj):
+            continue
+        nodes = material_obj.node_tree.nodes
+        diffuse = nodes.get("matDiffuseColor")
+        paint_layer = vehicle_material_paint_layer(material_obj)
+        updated = False
+        if paint_layer in VEHICLE_BODY_PAINT_LAYERS:
+            layer_node = nodes.get(f"PreviewBodyColor{paint_layer}")
+            if layer_node is not None and len(layer_node.inputs) >= 3:
+                for index, component in enumerate(color[:3]):
+                    layer_node.inputs[index].default_value = component
+                updated = True
+        else:
+            try:
+                diffuse.set_vec3(color[:3])
+                updated = True
+            except Exception:
+                pass
+        if updated:
+            changed.append(material_obj.name)
+    if changed:
+        print(f"Vehicle paint tone adjusted: {len(changed)}")
+        print("Vehicle paint tone materials: " + ", ".join(changed[:36]))
+    return len(changed)
+
+
+def vehicle_black_texture_tone_factor(name):
+    if not use_legacy_vehicle_black_cutout():
+        return 0.0
+    raw = str(name or "").lower()
+    key = normalized_texture_name(name)
+    if not key or "pearlescent" in raw or protected_vehicle_model_tone_material(name):
+        return 0.0
+    if "[primary]" in raw or "[secondary]" in raw or key.isdigit() or key == "matte":
+        return 0.97
+    if is_paint_like_material(name):
+        return 0.95
+    return 0.92
+
+
+def apply_vehicle_black_texture_tones():
+    if not use_legacy_vehicle_black_cutout():
+        return 0
+    changed = []
     for material_obj in bpy.data.materials:
         if not material_obj.use_nodes or not material_obj.node_tree:
             continue
-        if not should_tint_textured_paint(material_obj):
+        factor = vehicle_black_texture_tone_factor(material_obj.name)
+        if factor <= 0.0:
             continue
         for node in material_obj.node_tree.nodes:
             if node.bl_idname != "ShaderNodeBsdfPrincipled":
                 continue
-            if tint_textured_paint(material_obj, node):
-                tinted += 1
-                names.append(material_obj.name)
-    if tinted:
-        print(f"Model texture tone adjusted: {tinted}")
-        print("Model texture tone materials: " + ", ".join(names[:36]))
-    return tinted
+            base = node.inputs.get("Base Color")
+            if not base or not base.is_linked or not base_color_has_upstream_texture(node):
+                continue
+            if any(
+                link.from_node and link.from_node.name == "vehicle_renderer_black_texture_multiply"
+                for link in base.links
+            ):
+                continue
+            links = list(base.links)
+            if not links:
+                continue
+            source_socket = links[0].from_socket
+            for link in links:
+                material_obj.node_tree.links.remove(link)
+            mix_node = material_obj.node_tree.nodes.new("ShaderNodeMixRGB")
+            mix_node.name = "vehicle_renderer_black_texture_multiply"
+            mix_node.label = "legacy black texture detail"
+            mix_node.blend_type = "MULTIPLY"
+            mix_node.inputs["Fac"].default_value = factor
+            mix_node.inputs["Color2"].default_value = TEXTURED_BLACK_TINT
+            material_obj.node_tree.links.new(source_socket, mix_node.inputs["Color1"])
+            material_obj.node_tree.links.new(mix_node.outputs["Color"], base)
+            changed.append(material_obj.name)
+            break
+    if changed:
+        print(f"Vehicle black texture detail adjusted: {len(changed)}")
+        print("Vehicle black texture detail materials: " + ", ".join(changed[:36]))
+    return len(changed)
+
 
 def strip_texture_suffix(name):
     key = normalized_texture_name(name)
@@ -1049,7 +1088,7 @@ def bind_auto_livery_materials(texture_index, job, texture_manifest):
     for material_obj in bpy.data.materials:
         if not material_obj.use_nodes or not material_obj.node_tree:
             continue
-        if not should_tint_textured_paint(material_obj) and not is_paint_like_material(material_obj.name):
+        if vehicle_model_tone_factor(material_obj.name) <= 0.0 and not is_paint_like_material(material_obj.name):
             continue
         for node in material_obj.node_tree.nodes:
             if node.bl_idname != "ShaderNodeBsdfPrincipled":
@@ -1309,14 +1348,17 @@ def current_material_color(material_obj, node):
 
 
 def apply_untextured_model_tone(material_obj, node):
-    if ASSET_KIND != "vehicle" or MODEL_TONE not in TEXTURED_MODEL_TONE_TINTS:
+    if ASSET_KIND != "vehicle" or MODEL_TONE not in MODEL_TONE_PALETTE:
         return False
     if vehicle_model_tone_factor(material_obj.name) <= 0.0:
         return False
+    if vehicle_material_uses_paint_tone(material_obj) and not use_legacy_vehicle_black_cutout():
+        return True
     if base_color_has_upstream_texture(node):
         return False
-    force_input(node, "Base Color", PAINT_COLOR)
-    material_obj.diffuse_color = PAINT_COLOR
+    color = PAINT_COLOR if use_legacy_vehicle_black_cutout() else vehicle_paint_tone_color()
+    force_input(node, "Base Color", color)
+    material_obj.diffuse_color = color
     return True
 
 
@@ -1584,7 +1626,6 @@ def is_paint_like_material(name):
 def tune_paint_materials(texture_index, job, texture_manifest):
     changed = 0
     toned = 0
-    tinted = 0
     livery_path = find_livery_texture(
         texture_index,
         job.get("model", ""),
@@ -1607,8 +1648,6 @@ def tune_paint_materials(texture_index, job, texture_manifest):
                 link_image_to_base_color(material_obj, node, livery_image, livery_path.stem)
             elif tone_untextured_paint(material_obj, node):
                 toned += 1
-            if tint_textured_paint(material_obj, node):
-                tinted += 1
             set_input(node, "Roughness", 0.18)
             set_first_input(node, ("Specular IOR Level", "Specular"), 0.82)
             set_input(node, "Coat Weight", 0.82)
@@ -1617,8 +1656,6 @@ def tune_paint_materials(texture_index, job, texture_manifest):
             changed += 1
     if toned:
         print(f"Paint tone adjusted: {toned}")
-    if tinted:
-        print(f"Paint texture tone adjusted: {tinted}")
     return changed
 
 
@@ -1769,17 +1806,19 @@ def bind_extracted_textures(job):
     part_links = bind_untextured_materials(texture_index, texture_manifest)
     window_tunes = tune_window_materials()
     if use_legacy_vehicle_black_cutout():
+        paint_tones = 0
+        black_texture_tones = apply_vehicle_black_texture_tones()
         surface_tunes = tune_legacy_vehicle_black_semantic_materials()
-        paint_texture_tones = tint_textured_paint_materials()
     else:
+        paint_tones = apply_vehicle_paint_tones()
+        black_texture_tones = 0
         surface_tunes = tune_semantic_materials(bool(job.get("special_lights", True)))
-        paint_texture_tones = tint_textured_paint_materials()
     dump_wheel_materials()
     print(
         f"Texture bind matched: {matched}, missing: {len(missing)}, "
         f"livery_links: {livery_links}, generic_links: {generic_links}, part_links: {part_links}, "
         f"window_tunes: {window_tunes}, surface_tunes: {surface_tunes}, "
-        f"paint_texture_tones: {paint_texture_tones}. "
+        f"paint_tones: {paint_tones}, black_texture_tones: {black_texture_tones}. "
         "Material parameters preserved."
     )
     write_texture_bind_report(

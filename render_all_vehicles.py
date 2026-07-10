@@ -891,7 +891,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--floor-gap", type=float, default=0.12, help="Lower the floor below visible bounds to avoid wheel clipping.")
     parser.add_argument("--cutout", action="store_true", help="Render green screen and output transparent cropped PNG.")
-    parser.add_argument("--model-tone", choices=("gray", "white", "black"), default="gray", help="Fallback material tone when no color texture exists.")
+    parser.add_argument(
+        "--model-tone",
+        choices=("gray", "white", "black"),
+        default="gray",
+        help="Vehicle paint tone. Gray/white use native paint layers; black keeps legacy texture-detail shading.",
+    )
     parser.add_argument("--no-special-lights", action="store_true", help="Disable police/self-emissive material emission tuning.")
     parser.add_argument("--key-green", default="", help="Standalone green-screen PNG file/folder to key and crop.")
     parser.add_argument("--key-out", default="", help="Output file/folder for --key-green.")
