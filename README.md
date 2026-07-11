@@ -1,5 +1,7 @@
 # Model Renderer
 
+[![Build](https://github.com/ch-jack/CK-model_renderer/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/ch-jack/CK-model_renderer/actions/workflows/build.yml)
+
 作者：JACK
 联系方式：QQ 2518926462
 
@@ -171,8 +173,20 @@ vehicle_renderer/
     texconv.exe
 ```
 
-## 参考
+## 自动构建与发布
 
+- 推送到 `main`、提交 Pull Request 或手动运行 `Build` 工作流时，会生成 Windows ZIP 和 SHA256 校验文件，可在该次 Actions 的 Artifacts 中下载。
+- 推送 `v*` 标签（例如 `v1.0.0`）时，会自动创建对应的 GitHub Release，并上传 ZIP 和 SHA256 文件。
+- 发布包包含固定版本的 Sollumz 2.8.3 和全部运行脚本、文档、共享贴图及工具，但不包含 Blender、Python 和 .NET Framework。
+- 运行环境需要 Windows、Python、Blender 4.2+（推荐 5.1）和 .NET Framework 4.8。
+
+本地生成同样的发布包：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1 -OutputDirectory dist -SollumzSource Sollumz -Version local
+```
+
+## 参考
 - [dexyfex/CodeWalker](https://github.com/dexyfex/CodeWalker)
 - [Sollumz/Sollumz](https://github.com/Sollumz/Sollumz)
 

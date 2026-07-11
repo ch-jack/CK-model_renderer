@@ -26,3 +26,4 @@ tools/*.dds
 Thumbs.db
 .vscode/
 .idea/
+dist/
