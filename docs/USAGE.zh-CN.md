@@ -12,7 +12,8 @@
 3. 扫描 `.yft`、`.ydr`、`.ydd`、`.ymap`。
 4. 从本地 `.ytd` 和共享 `vehshare.ytd` 提取贴图。
 5. 调用 Blender/Sollumz 导入模型、绑定贴图并渲染。
-6. 输出白底预览、绿幕预览、裁边透明 PNG、完整画布 `_alpha` PNG 和贴图报告。
+   YDR 内嵌贴图会直接保留；饰品自动使用 Cycles 和 AgX Punchy 柔光棚拍，只有带同名 YCD 动画的姿态模型使用正面特写。
+6. 输出棚拍/白底预览、绿幕预览、裁边透明 PNG、完整画布 `_alpha` PNG 和贴图报告。
 
 不传 `--model` 时，一个压缩包里有多少可导入模型就渲染多少个；传 `--model` 才会只渲染指定模型。
 
@@ -37,9 +38,9 @@
 
 ### 饰品示例
 
-| 模型 | 白底样图 | 透明 PNG |
+| 模型 | 棚拍样图 | 透明 PNG |
 | --- | --- | --- |
-| labubu_clap | ![labubu_clap white](images/accessory_labubu_clap_white.png) | ![labubu_clap cutout](images/accessory_labubu_clap_cutout.png) |
+| labubu_clap | ![labubu_clap studio](images/accessory_labubu_clap_white.png) | ![labubu_clap cutout](images/accessory_labubu_clap_cutout.png) |
 | shibanita | ![shibanita white](images/accessory_shibanita_white.png) | ![shibanita cutout](images/accessory_shibanita_cutout.png) |
 | keroppi | ![keroppi white](images/accessory_keroppi_white.png) | ![keroppi cutout](images/accessory_keroppi_cutout.png) |
 
@@ -162,6 +163,8 @@ note: no local YTD textures were extracted; add the correct .ytd next to the mod
 --no-special-lights
 --key-padding 0
 ```
+
+未传 `--yaw` 时，带同名 YCD 动画的饰品姿态模型使用 155 度正面特写，普通饰品和其他模型保持 135 度；显式传入 `--yaw` 会覆盖自动值。
 
 `--model-tone black` 是默认值；`gray/white/black` 都只调整模型原生主色、副色、珠光和明确的车漆材质，不覆盖或暗化漫反射贴图。玻璃、灯光、轮胎、轮毂、金属、碳纤维、塑料、内饰和贴花不参与改色。
 

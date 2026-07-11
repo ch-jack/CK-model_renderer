@@ -2127,6 +2127,8 @@ def tune_semantic_materials(enable_emission=True):
     for material_obj in bpy.data.materials:
         semantic = material_semantic(material_obj.name)
         native_paint = vehicle_material_uses_paint_tone(material_obj)
+        if ASSET_KIND != "vehicle" and semantic == "paint" and not native_paint:
+            continue
         if not semantic and not native_paint:
             continue
         if semantic == "glass" and not native_paint:
@@ -2209,6 +2211,25 @@ def tune_semantic_materials(enable_emission=True):
                 set_input(node, "Roughness", 0.12)
                 set_input(node, "Metallic", 0.0)
                 set_first_input(node, ("Specular IOR Level", "Specular"), 0.72)
+            changed += 1
+    return changed
+
+
+def tune_accessory_normal_maps():
+    if ASSET_KIND != "accessory":
+        return 0
+    changed = 0
+    for material_obj in bpy.data.materials:
+        if not material_obj.node_tree:
+            continue
+        for node in material_obj.node_tree.nodes:
+            if node.bl_idname != "ShaderNodeNormalMap":
+                continue
+            strength = node.inputs.get("Strength")
+            if strength is None or strength.is_linked:
+                continue
+            original = float(strength.default_value)
+            strength.default_value = min(max(original * 1.25, original), 1.5)
             changed += 1
     return changed
 
@@ -2473,6 +2494,14 @@ def bind_extracted_textures(job):
             candidates = node_texture_candidates(node, material_obj)
             texture_path = next((texture_index[name] for name in candidates if name in texture_index), None)
             if texture_path is None:
+                embedded_image = getattr(node, "image", None)
+                embedded_size = tuple(getattr(embedded_image, "size", (0, 0))) if embedded_image else (0, 0)
+                if embedded_image and min(embedded_size, default=0) > 0 and (
+                    embedded_image.packed_file or getattr(embedded_image, "has_data", False)
+                ):
+                    set_image_color_space(embedded_image, is_non_color_node(node, Path(embedded_image.name)))
+                    matched += 1
+                    continue
                 if candidates:
                     missing.add(candidates[0])
                 continue
@@ -2601,7 +2630,7 @@ def set_shadow_catcher(obj):
     return False
 
 
-def add_studio_wall(center, view_dir, max_dim, camera_visible=True):
+def add_studio_wall(center, view_dir, max_dim, camera_visible=True, color=(0.31, 0.31, 0.31, 1.0)):
     flat_dir = Vector((view_dir.x, view_dir.y, 0.0))
     if flat_dir.length < 0.001:
         return
@@ -2622,14 +2651,14 @@ def add_studio_wall(center, view_dir, max_dim, camera_visible=True):
     mesh.update()
     wall = bpy.data.objects.new("catalog_backdrop_wall", mesh)
     bpy.context.collection.objects.link(wall)
-    wall.data.materials.append(material("catalog_backdrop_wall", (0.31, 0.31, 0.31, 1.0), 0.82))
+    wall.data.materials.append(material("catalog_backdrop_wall", color, 0.82))
     if not camera_visible:
         set_camera_visible(wall, False)
     return wall
 
 
-def add_studio_floor(min_z, max_dim, cutout_mode):
-    floor_mat = material("catalog_floor", (0.88, 0.88, 0.86, 1.0), 0.46)
+def add_studio_floor(min_z, max_dim, cutout_mode, color=(0.88, 0.88, 0.86, 1.0)):
+    floor_mat = material("catalog_floor", color, 0.46)
     floor_size = max_dim * 4.4
     bpy.ops.mesh.primitive_plane_add(size=floor_size, location=(0, 0, min_z))
     floor = bpy.context.object
@@ -2694,6 +2723,8 @@ def projected_ortho_scale(objects, camera, aspect, margin=1.28, minimum=MIN_PROJ
 
 
 def setup_scene(job, objects):
+    accessory_studio = ASSET_KIND == "accessory"
+    accessory_closeup = accessory_studio and bool(job.get("accessory_closeup", False))
     cutout_mode = bool(job.get("green_screen", False))
     min_v, max_v = world_bounds(objects)
     center = (min_v + max_v) * 0.5
@@ -2711,8 +2742,9 @@ def setup_scene(job, objects):
     max_dim = max(dims.x, dims.y, dims.z, 1.0)
 
     floor_clearance = max(float(job.get("floor_clearance", 0.12)), 0.0)
+    floor_color = (0.20, 0.21, 0.22, 1.0) if accessory_studio else (0.88, 0.88, 0.86, 1.0)
     if not (cutout_mode and ASSET_KIND == "weapon"):
-        add_studio_floor(min_v.z - floor_clearance, max_dim, cutout_mode)
+        add_studio_floor(min_v.z - floor_clearance, max_dim, cutout_mode, floor_color)
 
     yaw = math.radians(float(job.get("yaw", -42.0)))
     elevation = math.radians(float(job.get("elevation", 26.0)))
@@ -2726,7 +2758,8 @@ def setup_scene(job, objects):
     )
     target = Vector((0, 0, center.z + dims.z * 0.03))
     view_dir = (target - cam_loc).normalized()
-    add_studio_wall(target, view_dir, max_dim, camera_visible=not cutout_mode)
+    wall_color = (0.18, 0.19, 0.20, 1.0) if accessory_studio else (0.31, 0.31, 0.31, 1.0)
+    add_studio_wall(target, view_dir, max_dim, camera_visible=not cutout_mode, color=wall_color)
 
     bpy.ops.object.camera_add(location=cam_loc)
     camera = bpy.context.object
@@ -2737,28 +2770,39 @@ def setup_scene(job, objects):
     if bool(job.get("orthographic", True)):
         camera.data.type = "ORTHO"
         aspect = float(job.get("width", 1600)) / max(float(job.get("height", 1000)), 1.0)
-        camera.data.ortho_scale = projected_ortho_scale(objects, camera, aspect, margin=1.85)
+        framing_margin = 0.90 if accessory_closeup and not cutout_mode else 1.85
+        camera.data.ortho_scale = projected_ortho_scale(objects, camera, aspect, margin=framing_margin)
     else:
         camera.data.type = "PERSP"
         camera.data.lens = 70
 
     light_scale = max(float(job.get("light_scale", 0.72)), 0.0)
-    light_specs = [
-        ("key", (-max_dim * 1.7, -max_dim * 2.1, max_dim * 2.6), 1800, max_dim * 2.9),
-        ("fill", (max_dim * 2.2, -max_dim * 1.0, max_dim * 1.5), 820, max_dim * 4.8),
-        ("rim", (0, max_dim * 1.9, max_dim * 2.1), 820, max_dim * 2.2),
-        ("front", (0, -max_dim * 2.9, max_dim * 1.2), 650, max_dim * 4.8),
-        ("top", (-max_dim * 0.35, -max_dim * 0.35, max_dim * 3.2), 900, max_dim * 3.6),
-    ]
-    for name, loc, power, size in light_specs:
+    if accessory_studio:
+        light_specs = [
+            ("key", (-max_dim * 1.8, -max_dim * 2.2, max_dim * 2.5), 1050, max_dim * 2.8, (1.0, 0.88, 0.78)),
+            ("fill", (max_dim * 2.2, -max_dim * 1.0, max_dim * 1.4), 380, max_dim * 4.2, (0.78, 0.87, 1.0)),
+            ("rim", (0, max_dim * 1.9, max_dim * 2.0), 500, max_dim * 2.4, (0.88, 0.93, 1.0)),
+            ("top", (-max_dim * 0.4, -max_dim * 0.2, max_dim * 3.0), 320, max_dim * 3.4, (1.0, 0.94, 0.88)),
+        ]
+    else:
+        light_specs = [
+            ("key", (-max_dim * 1.7, -max_dim * 2.1, max_dim * 2.6), 1800, max_dim * 2.9, (1.0, 1.0, 1.0)),
+            ("fill", (max_dim * 2.2, -max_dim * 1.0, max_dim * 1.5), 820, max_dim * 4.8, (1.0, 1.0, 1.0)),
+            ("rim", (0, max_dim * 1.9, max_dim * 2.1), 820, max_dim * 2.2, (1.0, 1.0, 1.0)),
+            ("front", (0, -max_dim * 2.9, max_dim * 1.2), 650, max_dim * 4.8, (1.0, 1.0, 1.0)),
+            ("top", (-max_dim * 0.35, -max_dim * 0.35, max_dim * 3.2), 900, max_dim * 3.6, (1.0, 1.0, 1.0)),
+        ]
+    for name, loc, power, size, color in light_specs:
         bpy.ops.object.light_add(type="AREA", location=loc)
         light = bpy.context.object
         light.name = f"catalog_{name}_light"
         light.data.energy = power * light_scale
         light.data.size = size
+        light.data.color = color
         look_at(light, target)
 
-    set_world_background((1.0, 1.0, 1.0, 1.0), max(float(job.get("world_strength", 0.45)), 0.0))
+    world_color = (0.86, 0.90, 1.0, 1.0) if accessory_studio else (1.0, 1.0, 1.0, 1.0)
+    set_world_background(world_color, max(float(job.get("world_strength", 0.45)), 0.0))
 
 
 def setup_render(job):
@@ -2819,7 +2863,11 @@ def setup_render(job):
                 break
             except Exception:
                 pass
-        for look in ("Medium High Contrast", "Medium Contrast", "None"):
+        if ASSET_KIND == "accessory":
+            look_candidates = ("AgX - Punchy", "AgX - Medium High Contrast", "None")
+        else:
+            look_candidates = ("None",)
+        for look in look_candidates:
             try:
                 scene.view_settings.look = look
                 break
@@ -3134,6 +3182,8 @@ def main():
 
     bind_extracted_textures(job)
     bake_sollumz_shader_parameters()
+    accessory_normal_tunes = tune_accessory_normal_maps()
+    print(f"Accessory normal maps tuned: {accessory_normal_tunes}")
     finalize_weapon_palette_materials()
     overlay_tunes = tune_effect_overlay_materials()
     print(f"Effect overlays finalized after shader bake: {overlay_tunes}")

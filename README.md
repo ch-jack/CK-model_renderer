@@ -30,9 +30,9 @@
 
 ### 饰品示例
 
-| 模型 | 白底样图 | 透明 PNG |
+| 模型 | 棚拍样图 | 透明 PNG |
 | --- | --- | --- |
-| labubu_clap | ![labubu_clap white](docs/images/accessory_labubu_clap_white.png) | ![labubu_clap cutout](docs/images/accessory_labubu_clap_cutout.png) |
+| labubu_clap | ![labubu_clap studio](docs/images/accessory_labubu_clap_white.png) | ![labubu_clap cutout](docs/images/accessory_labubu_clap_cutout.png) |
 | shibanita | ![shibanita white](docs/images/accessory_shibanita_white.png) | ![shibanita cutout](docs/images/accessory_shibanita_cutout.png) |
 | keroppi | ![keroppi white](docs/images/accessory_keroppi_white.png) | ![keroppi cutout](docs/images/accessory_keroppi_cutout.png) |
 
@@ -42,6 +42,8 @@
 - 自动解包 `.zip`、`.rar`、`.7z` 和 `.rpf`，支持压缩包里再套 RPF。
 - 一个压缩包内多个模型会全部生成任务；`--model` 只用于手动过滤指定模型。
 - 自动提取本地 `.ytd` 和共享 `vehshare.ytd`，绑定材质贴图。
+- 正确识别 YDR 内嵌 `color_d/color_n/color_s` 贴图，不再误报缺失或用外部颜色覆盖。
+- 饰品自动使用 Cycles、AgX Punchy 色彩、柔和棚拍光和灰色背景；带同名 YCD 动画的姿态模型自动使用正面特写，普通饰品与透明 PNG 保持完整安全取景。
 - DDS 转 PNG 时遇到损坏 DDS 会跳过坏图，不会让整个模型失败。
 - Blender 后台导入模型、绑定贴图、补齐模型缺失车轮、修正玻璃/车轮基础材质。
 - `--workers` 多进程并发渲染。
@@ -145,6 +147,8 @@ note: no local YTD textures were extracted; add the correct .ytd next to the mod
 --no-special-lights
 --key-padding 0
 ```
+
+未传 `--yaw` 时，带同名 YCD 动画的饰品姿态模型使用 155 度正面特写，普通饰品和其他模型保持 135 度；显式传入 `--yaw` 会覆盖自动值。
 
 `--model-tone black` 是默认值；`gray/white/black` 都只调整模型原生主色、副色、珠光和明确的车漆材质，不覆盖或暗化漫反射贴图。玻璃、灯光、轮胎、轮毂、金属、碳纤维、塑料、内饰和贴花不参与改色。
 

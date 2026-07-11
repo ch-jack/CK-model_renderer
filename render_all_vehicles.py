@@ -598,6 +598,10 @@ def unpack_rpfs(scan_roots: list[Path], work_dir: Path, rpf_tool: Path) -> list[
 def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir: Path, out_dir: Path) -> VehicleJob:
     model = clean_model_name(asset)
     source_dir = asset.parent.resolve()
+    animation_stems = {path.stem.lower() for path in source_dir.glob("*.ycd")}
+    accessory_closeup = asset_kind == "accessory" and (
+        model.lower() in animation_stems or f"clip@{model.lower()}" in animation_stems
+    )
     ytd_names = tuple(matching_ytds(source_dir, model, args.ytd_mode))
     resource_root = vehicle_resource_root(source_dir) if asset_kind == "vehicle" else None
     assembly_plan: dict[str, object] = {"enabled": False, "mode": "none", "parts": []}
@@ -620,8 +624,21 @@ def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir:
     exposure = args.exposure
     world_strength = args.world_strength
     light_scale = args.light_scale
+    yaw = args.yaw
+    engine = args.engine
     key_padding = args.key_padding
-    if args.cutout and asset_kind != "vehicle":
+    if asset_kind == "accessory":
+        if args.engine_auto:
+            engine = "cycles"
+        if args.yaw_auto and accessory_closeup:
+            yaw = 155.0
+        if args.exposure_auto:
+            exposure = -0.30
+        if args.world_strength_auto:
+            world_strength = 0.20
+        if args.light_scale_auto:
+            light_scale = 0.62
+    elif args.cutout and asset_kind != "vehicle":
         if args.exposure_auto:
             exposure = -0.08
         if args.world_strength_auto:
@@ -649,6 +666,7 @@ def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir:
     data = {
         "model": model,
         "asset_kind": asset_kind,
+        "accessory_closeup": accessory_closeup,
         "source_dir": str(source_dir),
         "asset_name": asset.name,
         "yft_name": asset.name,
@@ -671,8 +689,8 @@ def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir:
         "width": args.width,
         "height": args.height,
         "samples": args.samples,
-        "engine": args.engine,
-        "yaw": args.yaw,
+        "engine": engine,
+        "yaw": yaw,
         "elevation": args.elevation,
         "exposure": exposure,
         "world_strength": world_strength,
@@ -871,6 +889,10 @@ def run_green_key(blender: Path, args) -> int:
 
 
 def apply_render_defaults(args) -> None:
+    if args.engine is None:
+        args.engine = "eevee"
+    if args.yaw is None:
+        args.yaw = 135.0
     if args.exposure is None:
         args.exposure = 0.16 if args.cutout else -0.2
     if args.world_strength is None:
@@ -904,8 +926,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--width", type=int, default=1600)
     parser.add_argument("--height", type=int, default=1000)
     parser.add_argument("--samples", type=int, default=64)
-    parser.add_argument("--engine", choices=("eevee", "cycles"), default="eevee")
-    parser.add_argument("--yaw", type=float, default=135.0)
+    parser.add_argument("--engine", choices=("eevee", "cycles"), default=None, help="Render engine. Auto: Cycles for accessories, Eevee for other models.")
+    parser.add_argument("--yaw", type=float, default=None, help="Camera yaw. Auto: 155 for accessories, 135 for other models.")
     parser.add_argument("--elevation", type=float, default=26.0)
     parser.add_argument(
         "--exposure",
@@ -963,6 +985,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    args.engine_auto = args.engine is None
+    args.yaw_auto = args.yaw is None
     args.exposure_auto = args.exposure is None
     args.world_strength_auto = args.world_strength is None
     args.light_scale_auto = args.light_scale is None
