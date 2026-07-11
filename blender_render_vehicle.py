@@ -344,6 +344,62 @@ def align_auxiliary_pattern_meshes(base):
     return aligned
 
 
+def is_rgb_overlay_mesh(obj):
+    name = normalized_object_name(obj.name)
+    return bool(re.match(r"^rgb(?:\d|_|$)", name))
+
+
+def align_detached_rgb_overlays(base):
+    if base is None:
+        return []
+    meshes = [
+        obj
+        for obj in bpy.data.objects
+        if obj.type == "MESH" and mesh_armature(obj) == base and not obj.hide_render
+    ]
+    overlays = [obj for obj in meshes if is_rgb_overlay_mesh(obj)]
+    targets = [obj for obj in meshes if not is_rgb_overlay_mesh(obj)]
+    aligned = []
+    for obj in overlays:
+        source_center, source_size = world_box_center_and_size(obj)
+        candidates = []
+        for target in targets:
+            target_center, target_size = world_box_center_and_size(target)
+            ratios = tuple(
+                source_size[axis] / max(target_size[axis], 0.01)
+                for axis in range(3)
+            )
+            if not all(0.78 <= ratio <= 1.28 for ratio in ratios):
+                continue
+            delta = target_center - source_center
+            shift = Vector(
+                tuple(
+                    delta[axis]
+                    if abs(delta[axis]) > max(target_size[axis] * 0.4, 0.6)
+                    else 0.0
+                    for axis in range(3)
+                )
+            )
+            if shift.length <= 0.001:
+                continue
+            size_error = sum(abs(1.0 - ratio) for ratio in ratios)
+            candidates.append((size_error, target, shift))
+        if not candidates:
+            continue
+        _, target, shift = min(candidates, key=lambda item: item[0])
+        obj.matrix_world.translation += shift
+        aligned.append(
+            {
+                "object": obj.name,
+                "target": target.name,
+                "shift": tuple(round(value, 4) for value in shift),
+            }
+        )
+    bpy.context.view_layer.update()
+    if aligned:
+        print(f"Vehicle RGB overlays aligned: {aligned}")
+    return aligned
+
 def is_detached_effect_shell(obj):
     material_names = [
         normalized_object_name(material.name)
@@ -1347,8 +1403,222 @@ def find_generic_asset_texture(texture_index, local_texture_names):
     return max(candidates, key=lambda item: item[0])[1]
 
 
+def used_mesh_materials():
+    materials = {}
+    for obj in bpy.context.scene.objects:
+        if obj.type != "MESH" or obj.hide_render:
+            continue
+        for slot in obj.material_slots:
+            material_obj = slot.material
+            if material_obj is not None:
+                materials[material_obj.name] = material_obj
+    return list(materials.values())
+
+
+def weapon_texture_role(name):
+    key = normalized_texture_name(name)
+    if any(hint in key for hint in ("dpal", "palette", "tint")):
+        return "palette"
+    if any(hint in key for hint in ("normal", "nrm", "nrml", "bump")) or key.endswith(("_n", "_nm")):
+        return "normal"
+    if "rough" in key:
+        return "roughness"
+    if "gloss" in key:
+        return "glossiness"
+    if any(hint in key for hint in ("metallic", "metalness")):
+        return "metallic"
+    if "spec" in key or key.endswith("_s"):
+        return "specular"
+    if key.endswith("_ao") or key.startswith("ao_") or key == "ao":
+        return "ao"
+    if "height" in key or "displace" in key:
+        return "height"
+    return "color"
+
+
+def weapon_texture_family(name):
+    key = normalized_texture_name(name)
+    suffixes = (
+        "_materialopacity", "_base_color", "_basecolor", "_glossiness",
+        "_roughness", "_metalness", "_metallic", "_specular", "_diffuse",
+        "_normal", "_height", "_opacity", "_albedo", "_gloss", "_rough",
+        "_spec", "_diff", "_color", "_nrm", "_nrml", "_bump", "_col",
+        "_ao", "_nm", "_d", "_n", "_s",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if key.endswith(suffix) and len(key) > len(suffix) + 1:
+                key = key[: -len(suffix)]
+                changed = True
+                break
+    return key
+
+
+def weapon_image_node_key(node):
+    image = getattr(node, "image", None)
+    if image is not None:
+        return normalized_texture_name(image.name)
+    return normalized_texture_name(getattr(node, "sollumz_texture_name", ""))
+
+
+def weapon_material_image_node(material_obj, local_texture_names, role, preferred_name=""):
+    candidates = []
+    for node in material_obj.node_tree.nodes:
+        if node.bl_idname != "ShaderNodeTexImage" or getattr(node, "image", None) is None:
+            continue
+        key = weapon_image_node_key(node)
+        if local_texture_names and key not in local_texture_names:
+            continue
+        if weapon_texture_role(key) != role:
+            continue
+        score = 0
+        if normalized_texture_name(node.name) == normalized_texture_name(preferred_name):
+            score += 100
+        if normalized_texture_name(getattr(node, "label", "")) == normalized_texture_name(preferred_name):
+            score += 100
+        if weapon_texture_family(key) == weapon_texture_family(material_obj.name):
+            score += 40
+        candidates.append((score, node))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def replace_socket_link(material_obj, source, target):
+    if source is None or target is None:
+        return False
+    for link in list(target.links):
+        material_obj.node_tree.links.remove(link)
+    material_obj.node_tree.links.new(source, target)
+    return True
+
+
+def weapon_image_average_luminance(image):
+    if image is None:
+        return 0.0
+    try:
+        pixels = image.pixels
+        channels = max(int(image.channels), 1)
+        pixel_count = len(pixels) // channels
+        step = max(pixel_count // 2048, 1)
+        total = 0.0
+        count = 0
+        for index in range(0, pixel_count, step):
+            offset = index * channels
+            red = float(pixels[offset])
+            green = float(pixels[offset + min(1, channels - 1)])
+            blue = float(pixels[offset + min(2, channels - 1)])
+            total += red * 0.2126 + green * 0.7152 + blue * 0.0722
+            count += 1
+        return total / max(count, 1)
+    except Exception:
+        return 0.0
+
+
+def tint_bright_weapon_palette_preview(material_obj, bsdf, color_node):
+    base = bsdf.inputs.get("Base Color")
+    if base is None or not base.is_linked or color_node is None:
+        return None
+    source_link = base.links[0]
+    if "diffpal" not in normalized_texture_name(source_link.from_node.name):
+        return None
+    source_image = getattr(source_link.from_node, "image", None)
+    if source_image is not None and weapon_texture_role(source_image.name) == "palette":
+        return None
+
+    luminance = weapon_image_average_luminance(getattr(color_node, "image", None))
+    if luminance <= 0.18:
+        return None
+    factor = max(0.14, min(0.32, 0.045 / luminance))
+
+    nodes = material_obj.node_tree.nodes
+    multiply = nodes.get("vehicle_renderer_weapon_palette_tint")
+    if multiply is None:
+        multiply = nodes.new("ShaderNodeMixRGB")
+        multiply.name = "vehicle_renderer_weapon_palette_tint"
+        multiply.blend_type = "MULTIPLY"
+    desaturate = nodes.get("vehicle_renderer_weapon_palette_desaturate")
+    if desaturate is None:
+        desaturate = nodes.new("ShaderNodeHueSaturation")
+        desaturate.name = "vehicle_renderer_weapon_palette_desaturate"
+    desaturate.inputs["Saturation"].default_value = 0.08
+    desaturate.inputs["Value"].default_value = 0.72
+    multiply.inputs[0].default_value = 1.0
+    multiply.inputs[2].default_value = (factor, factor, factor, 1.0)
+    replace_socket_link(material_obj, source_link.from_socket, desaturate.inputs["Color"])
+    replace_socket_link(material_obj, desaturate.outputs["Color"], multiply.inputs[1])
+    replace_socket_link(material_obj, multiply.outputs["Color"], base)
+    return factor
+
+def finalize_weapon_palette_materials():
+    if ASSET_KIND != "weapon":
+        return 0
+    changed = 0
+    for material_obj in used_mesh_materials():
+        if not material_obj.node_tree:
+            continue
+        if material_obj.node_tree.nodes.get("vehicle_renderer_weapon_palette_tint") is None:
+            continue
+        for bsdf in material_obj.node_tree.nodes:
+            if bsdf.bl_idname != "ShaderNodeBsdfPrincipled":
+                continue
+            force_input(bsdf, "Roughness", 0.44)
+            force_input(bsdf, "Metallic", 0.0)
+            force_input(bsdf, "Specular IOR Level", 0.22)
+            force_input(bsdf, "Specular", 0.22)
+            force_input(bsdf, "Coat Weight", 0.04)
+            force_input(bsdf, "Coat Roughness", 0.28)
+            changed += 1
+    if changed:
+        print(f"Weapon palette surfaces finalized: {changed}")
+    return changed
+
+def bind_weapon_pbr_materials(texture_index, texture_manifest):
+    local_texture_names = texture_manifest.get("local", set())
+    if not local_texture_names:
+        return 0
+    texture_path = find_generic_asset_texture(texture_index, local_texture_names)
+    if texture_path is None:
+        return 0
+
+    image = bpy.data.images.load(str(texture_path), check_existing=True)
+    set_image_color_space(image, False)
+    linked = 0
+    names = []
+    for material_obj in used_mesh_materials():
+        if not material_obj.use_nodes or not material_obj.node_tree:
+            continue
+        if material_semantic(material_obj.name) in {"glass", "light"}:
+            continue
+        for node in material_obj.node_tree.nodes:
+            if node.bl_idname != "ShaderNodeBsdfPrincipled":
+                continue
+            color_node = weapon_material_image_node(
+                material_obj, local_texture_names, "color", "DiffuseSampler"
+            )
+            if base_color_has_upstream_texture(node) and not base_color_uses_palette_texture(node):
+                tint_factor = tint_bright_weapon_palette_preview(
+                    material_obj, node, color_node
+                )
+                if tint_factor is not None:
+                    names.append(f"{material_obj.name}:palette-tint={tint_factor:.3f}")
+                continue
+            if link_image_to_base_color(material_obj, node, image, texture_path.stem):
+                linked += 1
+                names.append(material_obj.name)
+    if linked:
+        print(f"Weapon fallback texture linked: {texture_path.stem} -> {linked}")
+        print("Weapon fallback materials: " + ", ".join(names[:24]))
+    else:
+        print("Weapon native materials preserved")
+    return linked
+
+
 def bind_generic_asset_texture(texture_index, texture_manifest, job):
-    if job.get("asset_kind", "vehicle") == "vehicle":
+    asset_kind = job.get("asset_kind", "vehicle")
+    if asset_kind == "weapon":
+        return bind_weapon_pbr_materials(texture_index, texture_manifest)
+    if asset_kind == "vehicle":
         return 0
     local_texture_names = texture_manifest.get("local", set())
     if not local_texture_names:
@@ -1766,6 +2036,8 @@ def is_full_body_overlay_material(material_obj):
 
 
 def tune_effect_overlay_materials():
+    if ASSET_KIND != "vehicle":
+        return 0
     changed = []
     for material_obj in bpy.data.materials:
         if not material_obj.node_tree or not is_effect_overlay_material(material_obj):
@@ -2439,7 +2711,8 @@ def setup_scene(job, objects):
     max_dim = max(dims.x, dims.y, dims.z, 1.0)
 
     floor_clearance = max(float(job.get("floor_clearance", 0.12)), 0.0)
-    add_studio_floor(min_v.z - floor_clearance, max_dim, cutout_mode)
+    if not (cutout_mode and ASSET_KIND == "weapon"):
+        add_studio_floor(min_v.z - floor_clearance, max_dim, cutout_mode)
 
     yaw = math.radians(float(job.get("yaw", -42.0)))
     elevation = math.radians(float(job.get("elevation", 26.0)))
@@ -2854,10 +3127,14 @@ def main():
         apply_vehicle_visibility(assembly_plan)
     else:
         import_result = import_assets(source_dir, [asset_name])
+        if job.get("asset_kind", "vehicle") == "vehicle":
+            base = find_model_armature(str(job.get("model", "")))
+            align_detached_rgb_overlays(base)
     print(f"Import result: {import_result}")
 
-    bake_sollumz_shader_parameters()
     bind_extracted_textures(job)
+    bake_sollumz_shader_parameters()
+    finalize_weapon_palette_materials()
     overlay_tunes = tune_effect_overlay_materials()
     print(f"Effect overlays finalized after shader bake: {overlay_tunes}")
     wheels_created = mirror_missing_wheels() if job.get("asset_kind", "vehicle") == "vehicle" else 0

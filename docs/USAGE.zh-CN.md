@@ -25,14 +25,15 @@
 | 16MANDBS111 | ![16MANDBS111 gray model](images/vehicle_16MANDBS111_gray_model.png) | ![16MANDBS111 gray png](images/vehicle_16MANDBS111_gray_png.png) | ![16MANDBS111 black model](images/vehicle_16MANDBS111_black_model.png) | ![16MANDBS111 black png](images/vehicle_16MANDBS111_black_png.png) | ![16MANDBS111 white model](images/vehicle_16MANDBS111_white_model.png) | ![16MANDBS111 white png](images/vehicle_16MANDBS111_white_png.png) | ![16MANDBS111 greenscreen](images/vehicle_16MANDBS111_greenscreen.png) |
 | fordc72 | ![fordc72 gray model](images/vehicle_fordc72_gray_model.png) | ![fordc72 gray png](images/vehicle_fordc72_gray_png.png) | ![fordc72 black model](images/vehicle_fordc72_black_model.png) | ![fordc72 black png](images/vehicle_fordc72_black_png.png) | ![fordc72 white model](images/vehicle_fordc72_white_model.png) | ![fordc72 white png](images/vehicle_fordc72_white_png.png) | ![fordc72 greenscreen](images/vehicle_fordc72_greenscreen.png) |
 | zondarevob | ![zondarevob gray model](images/vehicle_zondarevob_gray_model.png) | ![zondarevob gray png](images/vehicle_zondarevob_gray_png.png) | ![zondarevob black model](images/vehicle_zondarevob_black_model.png) | ![zondarevob black png](images/vehicle_zondarevob_black_png.png) | ![zondarevob white model](images/vehicle_zondarevob_white_model.png) | ![zondarevob white png](images/vehicle_zondarevob_white_png.png) | ![zondarevob greenscreen](images/vehicle_zondarevob_greenscreen.png) |
+| LD_Bolide | ![LD_Bolide gray model](images/vehicle_LD_Bolide_gray_model.png) | ![LD_Bolide gray png](images/vehicle_LD_Bolide_gray_png.png) | ![LD_Bolide black model](images/vehicle_LD_Bolide_black_model.png) | ![LD_Bolide black png](images/vehicle_LD_Bolide_black_png.png) | ![LD_Bolide white model](images/vehicle_LD_Bolide_white_model.png) | ![LD_Bolide white png](images/vehicle_LD_Bolide_white_png.png) | ![LD_Bolide greenscreen](images/vehicle_LD_Bolide_greenscreen.png) |
 
 ### 武器示例
 
 | 模型 | 白底样图 | 透明 PNG |
 | --- | --- | --- |
-| w_pi_fn509t | ![w_pi_fn509t white](images/weapon_w_pi_fn509t_white.png) | ![w_pi_fn509t cutout](images/weapon_w_pi_fn509t_cutout.png) |
+| w_ar_kajszs | ![w_ar_kajszs white](images/weapon_w_ar_kajszs_white.png) | ![w_ar_kajszs cutout](images/weapon_w_ar_kajszs_cutout.png) |
+| w_ar_kajszs_mag1 | ![w_ar_kajszs_mag1 white](images/weapon_w_ar_kajszs_mag1_white.png) | ![w_ar_kajszs_mag1 cutout](images/weapon_w_ar_kajszs_mag1_cutout.png) |
 | w_sg_beanbagshotgun | ![w_sg_beanbagshotgun white](images/weapon_w_sg_beanbagshotgun_white.png) | ![w_sg_beanbagshotgun cutout](images/weapon_w_sg_beanbagshotgun_cutout.png) |
-| w_pi_c17s | ![w_pi_c17s white](images/weapon_w_pi_c17s_white.png) | ![w_pi_c17s cutout](images/weapon_w_pi_c17s_cutout.png) |
 
 ### 饰品示例
 
@@ -73,7 +74,7 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 只渲染指定模型：
 
 ```powershell
-python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --model w_pi_fn509t --cutout
+python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --model w_ar_kajszs --cutout
 ```
 
 ## 4. 支持资源类型
