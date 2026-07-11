@@ -36,7 +36,7 @@ jobs:
       - name: Build release package
         shell: pwsh
         env:
-          BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}-{1}', github.run_number, github.sha) }}
+          BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (github.ref == 'refs/heads/main' && 'latest' || format('build-{0}-{1}', github.run_number, github.sha)) }}
         run: >-
           ./scripts/build_release.ps1
           -OutputDirectory dist
@@ -55,15 +55,30 @@ jobs:
           retention-days: 30
 
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $files = Get-ChildItem dist -File | Where-Object { $_.Extension -eq '.zip' -or $_.Name.EndsWith('.sha256') }
-          gh release view $env:GITHUB_REF_NAME *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:GITHUB_REF_NAME @($files.FullName) --clobber
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $releaseTag = $env:GITHUB_REF_NAME
+            gh release view $releaseTag *> $null
+            if ($LASTEXITCODE -eq 0) {
+              gh release upload $releaseTag @($files.FullName) --clobber
+            } else {
+              gh release create $releaseTag @($files.FullName) --title $releaseTag --generate-notes
+            }
           } else {
-            gh release create $env:GITHUB_REF_NAME @($files.FullName) --title $env:GITHUB_REF_NAME --generate-notes
+            $releaseTag = 'latest'
+            $title = 'Latest Build'
+            $notes = "Automated build for commit $env:GITHUB_SHA on main."
+            gh release view $releaseTag *> $null
+            if ($LASTEXITCODE -eq 0) {
+              gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/git/refs/tags/$releaseTag" -f sha=$env:GITHUB_SHA -F force=true
+              gh release upload $releaseTag @($files.FullName) --clobber
+              gh release edit $releaseTag --title $title --notes $notes --latest
+            } else {
+              gh release create $releaseTag @($files.FullName) --target $env:GITHUB_SHA --title $title --notes $notes --latest
+            }
           }
