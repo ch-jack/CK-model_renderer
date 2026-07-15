@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import errno
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +21,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TOOLS_DIR = SCRIPT_DIR / "tools"
 INNER_SCRIPT = SCRIPT_DIR / "blender_render_vehicle.py"
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
+MIN_BLENDER_VERSION = (4, 2, 0)
+MIN_FREE_DISK_BYTES = 1024**3
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,101 @@ def find_blender(blender_arg: str | None) -> Path:
     raise FileNotFoundError("Blender not found. Pass --blender or set BLENDER_EXE.")
 
 
+def require_supported_blender(blender: Path) -> str:
+    try:
+        result = subprocess.run(
+            [str(blender), "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"无法启动 Blender: {blender} ({exc})") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Blender 版本检测超时: {blender}") from exc
+
+    first_line = next((line.strip() for line in result.stdout.splitlines() if line.strip()), "")
+    match = re.search(r"\bBlender\s+(\d+)\.(\d+)(?:\.(\d+))?", first_line, re.IGNORECASE)
+    if result.returncode != 0 or not match:
+        detail = first_line or f"退出码 {result.returncode}"
+        raise RuntimeError(f"无法识别 Blender 版本: {blender} ({detail})")
+
+    version = tuple(int(value or 0) for value in match.groups())
+    if version < MIN_BLENDER_VERSION:
+        raise RuntimeError(
+            f"Blender {version[0]}.{version[1]}.{version[2]} 不受支持；"
+            "请安装 Blender 4.2 或更高版本（推荐 5.1）。"
+        )
+    return first_line
+
+
+def format_bytes(value: int) -> str:
+    units = ("B", "KB", "MB", "GB", "TB")
+    size = float(max(0, value))
+    unit = units[0]
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            break
+        size /= 1024.0
+    return f"{size:.1f} {unit}"
+
+
+def existing_disk_path(path: Path) -> Path:
+    candidate = path.resolve(strict=False)
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            raise FileNotFoundError(path)
+        candidate = parent
+    return candidate
+
+
+def disk_space_text(path: Path) -> str:
+    existing = existing_disk_path(path)
+    usage = shutil.disk_usage(existing)
+    volume = existing.anchor or str(existing)
+    return f"{volume} 剩余 {format_bytes(usage.free)}"
+
+
+def require_free_disk_space(path: Path, label: str, minimum: int = MIN_FREE_DISK_BYTES) -> None:
+    existing = existing_disk_path(path)
+    usage = shutil.disk_usage(existing)
+    print(f"[disk] {label}: {disk_space_text(existing)}", flush=True)
+    if usage.free < minimum:
+        raise RuntimeError(
+            f"磁盘空间不足: {existing.anchor or existing} 仅剩 {format_bytes(usage.free)}，"
+            f"至少需要 {format_bytes(minimum)}。请清理{label}所在磁盘后重试。"
+        )
+
+
+def is_no_space_error(exc: BaseException) -> bool:
+    if isinstance(exc, OSError):
+        if exc.errno == errno.ENOSPC or getattr(exc, "winerror", None) == 112:
+            return True
+    message = str(exc).lower()
+    return "no space left on device" in message or "not enough space on the disk" in message
+
+
+def texture_failure_message(exc: BaseException, job: VehicleJob) -> str:
+    if not is_no_space_error(exc):
+        return str(exc)
+
+    locations = []
+    for label, path in (
+        ("输出目录", job.texture_dir),
+        ("临时目录", job.texture_dir.parent.parent / "_temp"),
+    ):
+        try:
+            locations.append(f"{label} {disk_space_text(path)}")
+        except OSError:
+            locations.append(f"{label} {path}")
+    detail = "；".join(locations)
+    return f"磁盘空间不足，无法提取纹理。{detail}。请至少释放 1 GB 后重试。"
+
+
 def default_workers() -> int:
     cpu = os.cpu_count() or 4
     return max(1, min(4, cpu // 2 or 1))
@@ -83,7 +182,7 @@ def clean_model_name(asset: Path) -> str:
 
 
 def path_is_generated_output(path: Path) -> bool:
-    generated = {"_vehicle_renders", "_assembled_blender", "_work", "_archive_unpacked", "_rpf_unpacked"}
+    generated = {"_vehicle_renders", "_assembled_blender", "_temp", "_work", "_archive_unpacked", "_rpf_unpacked"}
     return any(part.lower() in generated for part in path.parts)
 
 
@@ -518,7 +617,7 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
                 log.write(f"missing ytd: {ytd_path}\n")
                 continue
 
-            with tempfile.TemporaryDirectory(prefix=f"{job.model}_ytd_") as tmp:
+            with tempfile.TemporaryDirectory(prefix=f"{job.model}_ytd_", dir=args.temp_root) as tmp:
                 tmp_dir = Path(tmp)
                 tmp_ytd = tmp_dir / ytd_path.name
                 dds_dir = tmp_dir / "dds"
@@ -723,10 +822,10 @@ def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir:
     )
 
 
-def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, float]:
+def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, float, str]:
     started = time.time()
     if job.final_output_path.exists() and args.skip_existing and not args.force:
-        return job.model, 0, 0.0
+        return job.model, 0, 0.0, ""
     if args.force and job.output_path.exists():
         job.output_path.unlink()
     if args.force and job.final_output_path.exists() and job.final_output_path != job.output_path:
@@ -735,10 +834,15 @@ def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, flo
     try:
         extract_textures_for_job(job, args)
     except Exception as exc:
-        job.texture_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with job.texture_log_path.open("a", encoding="utf-8", errors="replace") as log:
-            log.write(f"\nTEXTURE EXTRACT FAILED: {exc}\n")
-        return job.model, 3, time.time() - started
+        message = texture_failure_message(exc, job)
+        try:
+            job.texture_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with job.texture_log_path.open("a", encoding="utf-8", errors="replace") as log:
+                log.write(f"\nTEXTURE EXTRACT FAILED: {message}\n")
+        except OSError:
+            pass
+        print(f"[textures] {job.model} 失败: {message}", flush=True)
+        return job.model, 3, time.time() - started, message
 
     env = os.environ.copy()
     if args.sollumz:
@@ -778,7 +882,8 @@ def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, flo
     elapsed = time.time() - started
     if rc == 0 and not job.final_output_path.exists():
         rc = 2
-    return job.model, rc, elapsed
+    message = "" if rc == 0 else f"Blender 执行失败，详情见 {job.log_path}"
+    return job.model, rc, elapsed, message
 
 
 def read_json_object(path: Path) -> dict:
@@ -791,12 +896,27 @@ def read_json_object(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def read_texture_error(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    marker = "TEXTURE EXTRACT FAILED:"
+    index = text.rfind(marker)
+    if index < 0:
+        return ""
+    return text[index + len(marker) :].strip().splitlines()[0]
+
+
 def write_texture_summary_report(jobs: list[VehicleJob], out_dir: Path) -> int:
     items = []
     issue_count = 0
     for job in jobs:
         bind_report = read_json_object(job.texture_bind_report_path)
         manifest = read_json_object(job.texture_dir / "_texture_manifest.json")
+        texture_error = read_texture_error(job.texture_log_path)
         local_textures = manifest.get("local", []) if isinstance(manifest.get("local", []), list) else []
         shared_textures = manifest.get("shared", []) if isinstance(manifest.get("shared", []), list) else []
         missing = bind_report.get("missing", []) if isinstance(bind_report.get("missing", []), list) else []
@@ -809,6 +929,7 @@ def write_texture_summary_report(jobs: list[VehicleJob], out_dir: Path) -> int:
             "log": str(job.log_path),
             "texture_log": str(job.texture_log_path),
             "texture_bind_report": str(job.texture_bind_report_path),
+            "texture_error": texture_error,
             "local_texture_count": len(local_textures),
             "shared_texture_count": len(shared_textures),
             "texture_file_count": int(bind_report.get("texture_files", 0) or 0),
@@ -819,7 +940,7 @@ def write_texture_summary_report(jobs: list[VehicleJob], out_dir: Path) -> int:
             "part_links": int(bind_report.get("part_links", 0) or 0),
             "status": "ok" if job.final_output_path.exists() else "missing_output",
         }
-        item["has_texture_issue"] = bool(item["missing"]) or item["status"] != "ok"
+        item["has_texture_issue"] = bool(item["missing"]) or bool(texture_error) or item["status"] != "ok"
         if item["has_texture_issue"]:
             issue_count += 1
         items.append(item)
@@ -849,7 +970,11 @@ def write_texture_summary_report(jobs: list[VehicleJob], out_dir: Path) -> int:
             lines.append(f"  missing: {preview}{suffix}")
             if item["local_texture_count"] == 0:
                 lines.append("  note: no local YTD textures were extracted; add the correct .ytd next to the model or pass --shared-ytd.")
-        lines.append(f"  log: {item['log']}")
+        if item["texture_error"]:
+            lines.append(f"  error: {item['texture_error']}")
+            lines.append(f"  texture log: {item['texture_log']}")
+        else:
+            lines.append(f"  log: {item['log']}")
         lines.append("")
     if issue_count == 0:
         lines.append("No missing material textures were reported.")
@@ -992,7 +1117,12 @@ def main(argv: list[str]) -> int:
     args.light_scale_auto = args.light_scale is None
     apply_render_defaults(args)
     if args.key_green:
-        blender = find_blender(args.blender)
+        try:
+            blender = find_blender(args.blender)
+            require_supported_blender(blender)
+        except (FileNotFoundError, RuntimeError) as exc:
+            print(f"[environment] {exc}", file=sys.stderr, flush=True)
+            return 1
         return run_green_key(blender, args)
     if not args.input:
         parser.error("input is required unless --key-green is used")
@@ -1015,7 +1145,12 @@ def main(argv: list[str]) -> int:
     if not args.blender_user_scripts and local_scripts.exists():
         args.blender_user_scripts = str(local_scripts)
 
-    blender = find_blender(args.blender)
+    try:
+        blender = find_blender(args.blender)
+        blender_label = require_supported_blender(blender)
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"[environment] {exc}", file=sys.stderr, flush=True)
+        return 1
     default_out_root = input_dir.parent if input_dir.is_file() else input_dir
     out_dir = Path(args.out).resolve() if args.out else default_out_root / "_vehicle_renders"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1026,6 +1161,12 @@ def main(argv: list[str]) -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     textures_root.mkdir(parents=True, exist_ok=True)
     args.textures_root = textures_root.resolve()
+
+    try:
+        require_free_disk_space(out_dir, "运行目录")
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        print(f"[disk] {exc}", file=sys.stderr, flush=True)
+        return 1
 
     args.ytd_tool_path = None
     args.texconv_path = None
@@ -1042,11 +1183,21 @@ def main(argv: list[str]) -> int:
     )
 
     temp_root_obj = None
+    temp_parent = out_dir / "_temp"
     if args.keep_work:
-        temp_root = Path(tempfile.mkdtemp(prefix="vehicle_renderer_"))
+        temp_root = out_dir / "_work"
+        if temp_root.exists():
+            shutil.rmtree(temp_root)
+        temp_root.mkdir(parents=True, exist_ok=True)
     else:
-        temp_root_obj = tempfile.TemporaryDirectory(prefix="vehicle_renderer_")
+        temp_parent.mkdir(parents=True, exist_ok=True)
+        temp_root_obj = tempfile.TemporaryDirectory(prefix="run_", dir=temp_parent)
         temp_root = Path(temp_root_obj.name)
+    args.temp_root = temp_root.resolve()
+    tempfile.tempdir = str(args.temp_root)
+    for env_name in ("TEMP", "TMP", "TMPDIR"):
+        os.environ[env_name] = str(args.temp_root)
+    print(f"[temp] {args.temp_root}", flush=True)
 
     scan_roots = [] if input_dir.is_file() else [input_dir]
     if not args.no_unpack:
@@ -1089,7 +1240,7 @@ def main(argv: list[str]) -> int:
     jobs = [write_job_file(args, asset, asset_kind, jobs_dir, logs_dir, out_dir) for asset, asset_kind in unique_assets]
     workers = max(1, args.workers)
 
-    print(f"Blender: {blender}")
+    print(f"Blender: {blender} ({blender_label})")
     print(f"Input: {input_dir}")
     print(f"Output: {out_dir}")
     print(f"Assets: {len(jobs)}")
@@ -1108,11 +1259,12 @@ def main(argv: list[str]) -> int:
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(run_blender_job, blender, job, args) for job in jobs]
         for future in concurrent.futures.as_completed(futures):
-            model, rc, elapsed = future.result()
+            model, rc, elapsed, message = future.result()
             if rc == 0:
                 print(f"[ok] {model} {elapsed:.1f}s")
             else:
-                print(f"[fail] {model} rc={rc} {elapsed:.1f}s")
+                suffix = f" - {message}" if message else ""
+                print(f"[fail] {model} rc={rc} {elapsed:.1f}s{suffix}")
                 failures.append((model, rc))
 
     texture_issue_count = 0
@@ -1125,13 +1277,13 @@ def main(argv: list[str]) -> int:
             print(f"[textures] report={texture_report_path}")
 
     if args.keep_work and temp_root.exists():
-        kept = out_dir / "_work"
-        if kept.exists():
-            shutil.rmtree(kept)
-        shutil.move(str(temp_root), str(kept))
-        print(f"Work folder kept: {kept}")
+        print(f"Work folder kept: {temp_root}")
     elif temp_root_obj is not None:
         temp_root_obj.cleanup()
+        try:
+            temp_parent.rmdir()
+        except OSError:
+            pass
 
     print(f"Done. OK={len(jobs) - len(failures)} FAIL={len(failures)}")
     if failures:

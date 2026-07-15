@@ -40,6 +40,8 @@
 
 - 递归扫描指定文件夹，支持 `.yft`、`.ydr`、`.ydd`、`.ymap`。
 - 自动解包 `.zip`、`.rar`、`.7z` 和 `.rpf`，支持压缩包里再套 RPF。
+- 解包和纹理提取临时文件统一写入本次输出目录的 `_temp`，不使用系统临时目录；任务结束自动清理，`--keep-work` 时保留为 `_work`。
+- 启动前校验 Blender 4.2+（推荐 5.1）及运行目录可用空间；低于 1 GB 时直接给出明确提示。
 - 一个压缩包内多个模型会全部生成任务；`--model` 只用于手动过滤指定模型。
 - 自动提取本地 `.ytd` 和共享 `vehshare.ytd`，绑定材质贴图。
 - 正确识别 YDR 内嵌 `color_d/color_n/color_s` 贴图，不再误报缺失或用外部颜色覆盖。
@@ -116,6 +118,8 @@ _vehicle_renders/
   _texture_report.txt
   _texture_report.json
 ```
+
+运行期间还会创建 `_temp` 保存压缩包、RPF 和 YTD 中间文件；正常结束后自动删除。使用 `--keep-work` 时，中间文件改为保留在 `_work`。
 
 ## 贴图报告
 

@@ -15,6 +15,8 @@
    YDR 内嵌贴图会直接保留；饰品自动使用 Cycles 和 AgX Punchy 柔光棚拍，只有带同名 YCD 动画的姿态模型使用正面特写。
 6. 输出棚拍/白底预览、绿幕预览、裁边透明 PNG、完整画布 `_alpha` PNG 和贴图报告。
 
+所有解包和纹理中间文件都写入本次输出目录的 `_temp`，不再占用系统临时目录；正常结束自动删除，使用 `--keep-work` 时保留为 `_work`。开始处理前会检查 Blender 版本和运行目录空间，要求 Blender 4.2+（推荐 5.1）且至少剩余 1 GB。
+
 不传 `--model` 时，一个压缩包里有多少可导入模型就渲染多少个；传 `--model` 才会只渲染指定模型。
 
 ## 2. 效果样图
@@ -144,6 +146,8 @@ note: no local YTD textures were extracted; add the correct .ytd next to the mod
 ```
 
 损坏 DDS 会被跳过，其他贴图和模型继续渲染，日志里会显示 `skipped corrupt DDS`。
+
+如果日志显示 `磁盘空间不足` 或 `No space left on device`，请清理工具箱所在盘/输出盘，至少保留 1 GB 后重试。新版不会再把 RPF 和 YTD 临时文件写入 `C:\Users\...\Temp`。
 
 工具不会创建额外点光源补光；明确的警灯/自发光材质只按原材质颜色写入 emission，不按名字强制改成红/橙。
 
