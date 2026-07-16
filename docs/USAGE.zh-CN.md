@@ -208,6 +208,8 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 
 看 `_logs\模型名.log`。如果是 Sollumz `[DECOMPRESS_FAILED]`，说明该 `.ydr` 格式当前导入器读不了；工具会记录失败，不会影响其他模型继续渲染。
 
+`[fail] ... rc=2` 是外层脚本发现最终 PNG 不存在后的状态码，不是 Blender 原生错误。新版会在 `[blender-error]` 和 `[fail]` 行直接附带日志里的真实异常，并区分 Blender 未输出和透明图后处理失败；完整信息仍保存在上述模型日志中。
+
 ### 贴图缺失
 
 看 `_texture_report.txt`，按缺失的贴图名补 `.ytd`。

@@ -3,6 +3,7 @@ import math
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
 
 import bpy
@@ -2686,6 +2687,16 @@ def set_world_background(color, strength=1.0):
             strength_socket.default_value = strength
 
 
+def choose_render_engine(scene, candidates):
+    for engine in candidates:
+        try:
+            scene.render.engine = engine
+            print(f"Render engine: {engine}")
+            return engine
+        except Exception:
+            continue
+    raise RuntimeError(f"No supported render engine found: {', '.join(candidates)}")
+
 def look_at(obj, target):
     direction = Vector(target) - obj.location
     obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
@@ -2817,27 +2828,29 @@ def setup_render(job):
     scene.render.filepath = str(Path(job["output_path"]))
 
     if cutout_mode or job.get("engine", "eevee") == "cycles":
-        scene.render.engine = "CYCLES"
-        scene.cycles.samples = int(job.get("samples", 64))
-        scene.cycles.use_denoising = True
-        for attr, value in (
-            ("transparent_max_bounces", 8),
-            ("transparent_min_bounces", 2),
-            ("diffuse_bounces", 3),
-            ("glossy_bounces", 4),
-        ):
-            if hasattr(scene.cycles, attr):
+        selected_engine = choose_render_engine(scene, ("CYCLES", "BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"))
+        cycles = getattr(scene, "cycles", None)
+        if selected_engine == "CYCLES" and cycles is not None:
+            if hasattr(cycles, "samples"):
+                cycles.samples = int(job.get("samples", 64))
+            if hasattr(cycles, "use_denoising"):
                 try:
-                    setattr(scene.cycles, attr, value)
+                    cycles.use_denoising = True
                 except Exception:
                     pass
+            for attr, value in (
+                ("transparent_max_bounces", 8),
+                ("transparent_min_bounces", 2),
+                ("diffuse_bounces", 3),
+                ("glossy_bounces", 4),
+            ):
+                if hasattr(cycles, attr):
+                    try:
+                        setattr(cycles, attr, value)
+                    except Exception:
+                        pass
     else:
-        for engine in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", "CYCLES"):
-            try:
-                scene.render.engine = engine
-                break
-            except Exception:
-                continue
+        choose_render_engine(scene, ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", "CYCLES"))
         if hasattr(scene, "eevee"):
             for attr, value in (
                 ("use_gtao", True),
@@ -3201,7 +3214,19 @@ def main():
         bpy.ops.wm.save_as_mainfile(filepath=str(Path(job["blend_path"])))
 
     print(f"Render: {output_path}")
-    bpy.ops.render.render(write_still=True)
+    render_result = bpy.ops.render.render(write_still=True)
+    if isinstance(render_result, set) and "CANCELLED" in render_result:
+        raise RuntimeError(f"Blender render was cancelled for {job['model']}")
+    if not output_path.exists():
+        # Some Blender builds return FINISHED but do not flush write_still when
+        # the background image writer is interrupted. Save Render Result once
+        # more so the post-processing step can still produce the final PNG.
+        render_image = bpy.data.images.get("Render Result")
+        if render_image is not None:
+            try:
+                render_image.save_render(filepath=str(output_path), scene=bpy.context.scene)
+            except Exception as exc:
+                print(f"Render Result fallback failed: {exc}")
     if not output_path.exists():
         raise RuntimeError(f"Render output missing: {output_path}")
     if job.get("cutout_path"):
@@ -3216,4 +3241,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        # Blender may otherwise report a successful process exit for an
+        # unhandled Python exception in background mode. Make the outer batch
+        # runner receive a real failure code and retain the traceback in the
+        # per-model log.
+        traceback.print_exc()
+        raise SystemExit(1)

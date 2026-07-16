@@ -822,6 +822,27 @@ def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir:
     )
 
 
+def read_blender_error_summary(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+
+    error_pattern = re.compile(
+        r"(?:error|exception|failed|failure|cancelled|missing|memoryerror|runtimeerror|"
+        r"attributeerror|typeerror|valueerror|keyerror|filenotfounderror|oserror|permissionerror)",
+        re.IGNORECASE,
+    )
+    for raw_line in reversed(lines):
+        line = " ".join(raw_line.strip().split())
+        if not line or line.lower().startswith(("blender quit", "blender ")):
+            continue
+        if error_pattern.search(line) or "[DECOMPRESS_FAILED]" in line:
+            return line[:600]
+    return ""
+
 def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, float, str]:
     started = time.time()
     if job.final_output_path.exists() and args.skip_existing and not args.force:
@@ -882,7 +903,20 @@ def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, flo
     elapsed = time.time() - started
     if rc == 0 and not job.final_output_path.exists():
         rc = 2
-    message = "" if rc == 0 else f"Blender 执行失败，详情见 {job.log_path}"
+    if rc == 0:
+        message = ""
+    else:
+        detail = read_blender_error_summary(job.log_path)
+        if job.output_path.exists() and not job.final_output_path.exists():
+            stage = "透明图后处理失败"
+        elif not job.output_path.exists():
+            stage = "Blender 未生成渲染图"
+        else:
+            stage = "Blender 执行失败"
+        if detail:
+            stage = f"{stage}: {detail}"
+            print(f"[blender-error] {job.model}: {detail}", flush=True)
+        message = f"{stage}；完整日志: {job.log_path}"
     return job.model, rc, elapsed, message
 
 
