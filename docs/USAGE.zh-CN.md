@@ -210,6 +210,8 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 
 `[fail] ... rc=2` 是外层脚本发现最终 PNG 不存在后的状态码，不是 Blender 原生错误。新版会在 `[blender-error]` 和 `[fail]` 行直接附带日志里的真实异常，并区分 Blender 未输出和透明图后处理失败；完整信息仍保存在上述模型日志中。
 
+如果日志出现 `Material object has no attribute sollum_type` 或 `preferences.addons["Sollumz"]`，说明 Sollumz 在 Blender 5.0 中只完成了部分注册。新版会在后台启用前创建插件偏好项，并校验核心属性完整后才开始导入。
+
 ### 贴图缺失
 
 看 `_texture_report.txt`，按缺失的贴图名补 `.ytd`。

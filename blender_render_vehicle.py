@@ -109,8 +109,28 @@ def resolve_sollumz(addon_path):
     raise FileNotFoundError(f"Invalid Sollumz path: {path}")
 
 
+def missing_sollumz_runtime_features():
+    required_properties = (
+        ("Object", "sollum_type"),
+        ("Object", "drawable_properties"),
+        ("Object", "fragment_properties"),
+        ("Material", "sollum_type"),
+        ("Material", "shader_properties"),
+        ("ShaderNodeTexImage", "texture_properties"),
+    )
+    missing = []
+    if not operator_available("import_assets"):
+        missing.append("operator sollumz.import_assets")
+    for type_name, property_name in required_properties:
+        type_obj = getattr(bpy.types, type_name, None)
+        if type_obj is None or not hasattr(type_obj, property_name):
+            missing.append(f"bpy.types.{type_name}.{property_name}")
+    return missing
+
+
 def ensure_sollumz(job):
-    if operator_available("import_assets"):
+    missing = missing_sollumz_runtime_features()
+    if not missing:
         return
 
     user_config = job.get("blender_user_config") or os.environ.get("BLENDER_USER_CONFIG")
@@ -137,13 +157,19 @@ def ensure_sollumz(job):
     errors = []
     for module_name in dict.fromkeys(module_names):
         try:
-            addon_utils.enable(module_name, default_set=False, persistent=False)
-            if operator_available("import_assets"):
+            # Blender 5.0 only creates the AddonPreferences entry before
+            # register() when default_set is true. Sollumz reads that entry
+            # during registration, so a transient enable leaves it half loaded.
+            enabled_module = addon_utils.enable(module_name, default_set=True, persistent=False)
+            missing = missing_sollumz_runtime_features()
+            if not missing:
+                print(f"Sollumz runtime ready: {module_name}")
                 return
-            errors.append(f"{module_name}: enabled but operator not registered")
+            state = "enable returned None" if enabled_module is None else "runtime incomplete"
+            errors.append(f"{module_name}: {state}; missing {', '.join(missing)}")
         except Exception as exc:
             errors.append(f"{module_name}: {exc}")
-    raise RuntimeError("Could not enable Sollumz. " + " | ".join(errors))
+    raise RuntimeError("Could not enable a complete Sollumz runtime. " + " | ".join(errors))
 
 
 def call_sollumz_operator(name, **kwargs):
