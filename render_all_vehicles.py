@@ -5,13 +5,17 @@ import concurrent.futures
 import errno
 import json
 import os
+import platform
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from vehicle_assembly import build_assembly_plan, parse_vehicle_models, vehicle_resource_root
@@ -40,6 +44,15 @@ class VehicleJob:
     final_output_path: Path
     log_path: Path
     job_path: Path
+
+
+@dataclass(frozen=True)
+class RenderJobResult:
+    job: VehicleJob
+    status: str
+    return_code: int
+    elapsed_seconds: float
+    message: str
 
 
 def find_blender(blender_arg: str | None) -> Path:
@@ -514,16 +527,41 @@ def safe_folder_name(path: Path) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name)[:80] or "archive"
 
 
-def unpack_archives(input_dir: Path, work_dir: Path, archive_tool: Path | None) -> list[Path]:
+def append_operation(records: list[dict[str, object]] | None, operation: str, status: str, **details) -> None:
+    if records is None:
+        return
+    item: dict[str, object] = {"operation": operation, "status": status}
+    item.update(details)
+    records.append(item)
+
+
+def unpack_archives(
+    input_dir: Path, work_dir: Path, archive_tool: Path | None, operations: list[dict[str, object]] | None = None
+) -> list[Path]:
     roots: list[Path] = []
     if input_dir.is_file() and input_dir.suffix.lower() in ARCHIVE_EXTENSIONS:
         archives = [input_dir]
     else:
         archives = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in ARCHIVE_EXTENSIONS]
     if not archives:
+        append_operation(
+            operations,
+            "archive_unpack",
+            "not_needed",
+            detected=0,
+            note="输入中未发现 ZIP、RAR 或 7Z 压缩包。",
+        )
         return roots
     if not archive_tool:
         print("[archive] 7z.exe not found; skip .zip/.rar/.7z unpack")
+        append_operation(
+            operations,
+            "archive_unpack",
+            "skipped",
+            detected=len(archives),
+            sources=[str(path) for path in sorted(archives)],
+            reason="7z.exe 不可用，未执行压缩包解包。",
+        )
         return roots
 
     unpack_root = work_dir / "archive_unpacked"
@@ -546,8 +584,20 @@ def unpack_archives(input_dir: Path, work_dir: Path, archive_tool: Path | None) 
         with log_path.open("w", encoding="utf-8", errors="replace") as log:
             result = run_logged(cmd, archive_tool.parent, log)
         if result.returncode != 0:
+            append_operation(
+                operations,
+                "archive_unpack",
+                "failed",
+                source=str(archive),
+                output=str(out_dir),
+                log=str(log_path),
+                return_code=result.returncode,
+            )
             print(f"[archive] failed {archive} rc={result.returncode}")
             continue
+        append_operation(
+            operations, "archive_unpack", "success", source=str(archive), output=str(out_dir), log=str(log_path)
+        )
         roots.append(out_dir)
         queue.extend(
             p for p in out_dir.rglob("*") if p.is_file() and p.suffix.lower() in ARCHIVE_EXTENSIONS
@@ -657,7 +707,9 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
             print(f"[textures] no textures extracted for {job.model}")
 
 
-def unpack_rpfs(scan_roots: list[Path], work_dir: Path, rpf_tool: Path) -> list[Path]:
+def unpack_rpfs(
+    scan_roots: list[Path], work_dir: Path, rpf_tool: Path, operations: list[dict[str, object]] | None = None
+) -> list[Path]:
     roots = []
     rpf_files = []
     seen_rpfs: set[str] = set()
@@ -669,6 +721,13 @@ def unpack_rpfs(scan_roots: list[Path], work_dir: Path, rpf_tool: Path) -> list[
                 rpf_files.append(rpf)
     rpf_files = sorted(rpf_files)
     if not rpf_files:
+        append_operation(
+            operations,
+            "rpf_unpack",
+            "not_needed",
+            detected=0,
+            note="扫描范围内未发现 RPF。",
+        )
         return roots
 
     unpack_root = work_dir / "rpf_unpacked"
@@ -689,8 +748,21 @@ def unpack_rpfs(scan_roots: list[Path], work_dir: Path, rpf_tool: Path) -> list[
         )
         (out_dir / "_rpf_unpack.log").write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")
         if result.returncode != 0:
+            append_operation(
+                operations,
+                "rpf_unpack",
+                "failed",
+                source=str(rpf),
+                output=str(out_dir),
+                log=str(out_dir / "_rpf_unpack.log"),
+                return_code=result.returncode,
+            )
             print(f"[rpf] failed {rpf} rc={result.returncode}")
-        roots.append(out_dir)
+        else:
+            append_operation(
+                operations, "rpf_unpack", "success", source=str(rpf), output=str(out_dir), log=str(out_dir / "_rpf_unpack.log")
+            )
+            roots.append(out_dir)
     return roots
 
 
@@ -843,10 +915,10 @@ def read_blender_error_summary(path: Path) -> str:
             return line[:600]
     return ""
 
-def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, float, str]:
+def run_blender_job(blender: Path, job: VehicleJob, args) -> RenderJobResult:
     started = time.time()
     if job.final_output_path.exists() and args.skip_existing and not args.force:
-        return job.model, 0, 0.0, ""
+        return RenderJobResult(job, "skipped_existing", 0, 0.0, "已有截图，按 --skip-existing 跳过。")
     if args.force and job.output_path.exists():
         job.output_path.unlink()
     if args.force and job.final_output_path.exists() and job.final_output_path != job.output_path:
@@ -863,7 +935,7 @@ def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, flo
         except OSError:
             pass
         print(f"[textures] {job.model} 失败: {message}", flush=True)
-        return job.model, 3, time.time() - started, message
+        return RenderJobResult(job, "failed", 3, time.time() - started, message)
 
     env = os.environ.copy()
     if args.sollumz:
@@ -917,7 +989,8 @@ def run_blender_job(blender: Path, job: VehicleJob, args) -> tuple[str, int, flo
             stage = f"{stage}: {detail}"
             print(f"[blender-error] {job.model}: {detail}", flush=True)
         message = f"{stage}；完整日志: {job.log_path}"
-    return job.model, rc, elapsed, message
+    status = "success" if rc == 0 else "failed"
+    return RenderJobResult(job, status, rc, elapsed, message)
 
 
 def read_json_object(path: Path) -> dict:
@@ -1014,6 +1087,476 @@ def write_texture_summary_report(jobs: list[VehicleJob], out_dir: Path) -> int:
         lines.append("No missing material textures were reported.")
     txt_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return issue_count
+
+
+def read_png_artifact(path: Path) -> dict[str, object]:
+    artifact: dict[str, object] = {"path": str(path), "exists": path.is_file()}
+    if not artifact["exists"]:
+        return artifact
+    try:
+        artifact["bytes"] = path.stat().st_size
+        with path.open("rb") as handle:
+            header = handle.read(24)
+        if header.startswith(b"\x89PNG\r\n\x1a\n") and header[12:16] == b"IHDR":
+            width, height = struct.unpack(">II", header[16:24])
+            artifact["width"] = width
+            artifact["height"] = height
+    except OSError as exc:
+        artifact["metadata_error"] = str(exc)
+    return artifact
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def build_model_result_record(result: RenderJobResult, textures_enabled: bool = True) -> dict[str, object]:
+    job = result.job
+    job_data = read_json_object(job.job_path)
+    bind_report = read_json_object(job.texture_bind_report_path) if textures_enabled else {}
+    manifest = read_json_object(job.texture_dir / "_texture_manifest.json") if textures_enabled else {}
+    missing = bind_report.get("missing", [])
+    if not isinstance(missing, list):
+        missing = []
+    local_textures = manifest.get("local", [])
+    shared_textures = manifest.get("shared", [])
+    if not isinstance(local_textures, list):
+        local_textures = []
+    if not isinstance(shared_textures, list):
+        shared_textures = []
+    texture_error = read_texture_error(job.texture_log_path) if textures_enabled else ""
+    green_value = str(job_data.get("green_screen_path", ""))
+    blend_value = str(job_data.get("blend_path", ""))
+    green_screen_path = Path(green_value) if green_value else None
+    blend_path = Path(blend_value) if blend_value else None
+    warnings: list[str] = []
+    if missing:
+        warnings.append(f"缺少 {len(missing)} 个材质纹理。")
+    if texture_error:
+        warnings.append(f"贴图提取失败：{texture_error}")
+    if result.status == "failed" and result.message:
+        warnings.append(result.message)
+    if not job.final_output_path.is_file() and result.status != "skipped_existing":
+        warnings.append("最终裁边 PNG 不存在。")
+
+    return {
+        "model": job.model,
+        "asset_type": job.asset_kind,
+        "source": str(job.source_dir / job.asset_name),
+        "status": result.status,
+        "return_code": result.return_code,
+        "elapsed_seconds": round(result.elapsed_seconds, 3),
+        "message": result.message,
+        "outputs": {
+            "final_png": read_png_artifact(job.final_output_path),
+            "full_frame_alpha_png": read_png_artifact(job.output_path)
+            if job.output_path != job.final_output_path
+            else None,
+            "green_screen_png": read_png_artifact(green_screen_path) if green_screen_path else None,
+            "blend_file": {
+                "path": str(blend_path),
+                "exists": bool(blend_path and blend_path.is_file()),
+            }
+            if blend_path
+            else None,
+        },
+        "textures": {
+            "status": "processed" if textures_enabled else "skipped",
+            "requested_ytd": list(job.ytd_names),
+            "shared_ytd": [str(path) for path in job.shared_ytd_paths],
+            "local_texture_count": len(local_textures),
+            "shared_texture_count": len(shared_textures),
+            "bound_texture_count": int(bind_report.get("matched", 0) or 0),
+            "missing": sorted(str(name) for name in missing),
+            "error": texture_error,
+            "bind_report": str(job.texture_bind_report_path),
+            "extraction_log": str(job.texture_log_path),
+        },
+        "vehicle_assembly": job_data.get("vehicle_assembly", {}),
+        "job_file": str(job.job_path),
+        "blender_log": str(job.log_path),
+        "warnings": warnings,
+    }
+
+
+def markdown_cell(value: object) -> str:
+    return str(value if value is not None else "").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def describe_model_operation(item: dict[str, object]) -> str:
+    operation = str(item.get("operation", ""))
+    status = str(item.get("status", ""))
+    status_text = {
+        "success": "成功",
+        "completed": "完成",
+        "failed": "失败",
+        "skipped": "跳过",
+        "not_needed": "无需执行",
+        "cleaned": "已清理",
+        "kept": "已保留",
+    }.get(status, status or "已记录")
+    if operation == "archive_unpack":
+        source = item.get("source")
+        if source:
+            return f"压缩包解包（{status_text}）：{source}"
+        detail = item.get("reason") or item.get("note") or "已检查输入。"
+        return f"压缩包检查（{status_text}）：{detail}"
+    if operation == "rpf_unpack":
+        source = item.get("source")
+        if source:
+            return f"RPF 解包（{status_text}）：{source}"
+        detail = item.get("reason") or item.get("note") or "已检查扫描范围。"
+        return f"RPF 检查（{status_text}）：{detail}"
+    if operation == "input_scan":
+        return (
+            f"模型扫描（{status_text}）：扫描 {item.get('scan_roots', 0)} 个根目录，"
+            f"发现 {item.get('discovered', 0)} 个候选，创建 {item.get('jobs', 0)} 个渲染任务。"
+        )
+    if operation == "blender_render":
+        return (
+            f"Blender 渲染（{status_text}）：成功 {item.get('success', 0)}，"
+            f"跳过 {item.get('skipped', 0)}，失败 {item.get('failed', 0)}。"
+        )
+    if operation == "texture_report":
+        return f"贴图提取与绑定（{status_text}）：{item.get('issues', 0)} 个模型需要注意。"
+    if operation == "temp_workspace":
+        return f"临时工作目录（{status_text}）：{item.get('path', '')}"
+    return f"{operation or '操作'}（{status_text}）"
+
+
+def build_model_render_markdown(report: dict[str, object]) -> str:
+    summary = report["summary"]
+    status_text = {
+        "success": "全部成功",
+        "partial_success": "部分成功",
+        "failed": "失败",
+    }.get(str(report["status"]), str(report["status"]))
+    tick = chr(96)
+    lines = [
+        "# 模型自动截图执行报告",
+        "",
+        f"- 本次编号：{tick}{report['run_id']}{tick}",
+        f"- 开始时间：{report['started_at']}",
+        f"- 完成时间：{report['finished_at']}",
+        f"- 总耗时：{report['duration_seconds']:.1f} 秒",
+        f"- 执行结论：**{status_text}**",
+        f"- 输入：{tick}{report['input']['path']}{tick}",
+        f"- 输出：{tick}{report['output']['path']}{tick}",
+        "",
+    ]
+    if report.get("error"):
+        lines.extend(["## 执行错误", "", str(report["error"]), ""])
+
+    lines.extend(
+        [
+            "## 结果汇总",
+            "",
+            "| 发现模型 | 成功渲染 | 已有结果跳过 | 失败 | 贴图有问题 |",
+            "| ---: | ---: | ---: | ---: | ---: |",
+            (
+                f"| {summary['jobs']} | {summary['rendered']} | {summary['skipped']} | "
+                f"{summary['failed']} | {summary['texture_issues']} |"
+            ),
+            "",
+            "## 本次执行了什么",
+            "",
+        ]
+    )
+    operations = report.get("operations", [])
+    if operations:
+        for index, item in enumerate(operations, start=1):
+            lines.append(f"{index}. {describe_model_operation(item)}")
+    else:
+        lines.append("未进入模型扫描或渲染阶段。")
+    lines.extend(
+        [
+            "",
+            "## 逐模型结果",
+            "",
+            "| 模型 | 类型 | 结果 | 耗时 | 最终 PNG | 贴图情况 | 说明 |",
+            "| --- | --- | --- | ---: | --- | --- | --- |",
+        ]
+    )
+    result_labels = {"success": "成功", "skipped_existing": "跳过", "failed": "失败"}
+    results = report.get("results", [])
+    if results:
+        for item in results:
+            final_png = item["outputs"]["final_png"]
+            texture_data = item["textures"]
+            if texture_data["missing"]:
+                texture_text = f"缺少 {len(texture_data['missing'])} 项"
+            elif texture_data["error"]:
+                texture_text = "提取失败"
+            else:
+                texture_text = "正常"
+            output_text = Path(str(final_png["path"])).name if final_png.get("exists") else "未生成"
+            lines.append(
+                "| {model} | {asset_type} | {status} | {elapsed:.1f}s | {output} | {texture} | {message} |".format(
+                    model=markdown_cell(item["model"]),
+                    asset_type=markdown_cell(item["asset_type"]),
+                    status=markdown_cell(result_labels.get(item["status"], item["status"])),
+                    elapsed=float(item["elapsed_seconds"]),
+                    output=markdown_cell(output_text),
+                    texture=markdown_cell(texture_text),
+                    message=markdown_cell(item["message"]),
+                )
+            )
+    else:
+        lines.append("| - | - | 未创建任务 | 0.0s | - | - | - |")
+
+    attention_results = [item for item in results if item["warnings"]]
+    if attention_results:
+        lines.extend(["", "## 失败与警告明细", ""])
+        for item in attention_results:
+            result_text = result_labels.get(item["status"], item["status"])
+            lines.append(f"### {item['model']}（{result_text}）")
+            lines.append("")
+            lines.append(f"- 源文件：{tick}{item['source']}{tick}")
+            lines.append(f"- Blender 日志：{tick}{item['blender_log']}{tick}")
+            for warning in item["warnings"]:
+                lines.append(f"- {warning}")
+            missing = item["textures"]["missing"]
+            if missing:
+                preview = ", ".join(missing[:50])
+                suffix = f"（另有 {len(missing) - 50} 项）" if len(missing) > 50 else ""
+                lines.append(f"- 缺失纹理：{preview}{suffix}")
+            lines.append("")
+
+    lines.append("")
+    lines.extend(["## 环境与参数", "", tick * 3 + "json"])
+    lines.extend(
+        json.dumps(
+            {"environment": report["environment"], "request": report["request"]},
+            ensure_ascii=False,
+            indent=2,
+        ).splitlines()
+    )
+    lines.extend([tick * 3, "", "## 注意事项", ""])
+    for note in report["notes"]:
+        lines.append(f"- {note}")
+    lines.extend(
+        [
+            "",
+            "## 报告文件",
+            "",
+            f"- 本次 Markdown：{tick}{report['reports']['history_markdown']}{tick}",
+            f"- 本次 JSON：{tick}{report['reports']['history_json']}{tick}",
+            f"- 最新报告：{tick}{report['reports']['latest_markdown']}{tick}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_model_render_execution_report(
+    *,
+    out_dir: Path,
+    run_id: str,
+    started_at: datetime,
+    started_monotonic: float,
+    input_path: Path,
+    args,
+    blender: Path | None,
+    blender_label: str,
+    jobs: list[VehicleJob],
+    results: list[RenderJobResult],
+    operations: list[dict[str, object]],
+    status_override: str = "",
+    error: str = "",
+) -> dict[str, Path]:
+    finished_at = datetime.now().astimezone()
+    reports_dir = out_dir / "_reports"
+    report_stem = f"model-render-{started_at.strftime('%Y%m%d-%H%M%S')}-{run_id}"
+    paths = {
+        "history_markdown": reports_dir / f"{report_stem}.md",
+        "history_json": reports_dir / f"{report_stem}.json",
+        "latest_markdown": out_dir / "_render_report.md",
+        "latest_json": out_dir / "_render_report.json",
+    }
+
+    results_by_job = {id(result.job): result for result in results}
+    ordered_results = []
+    for job in jobs:
+        result = results_by_job.get(id(job))
+        if result is None:
+            result = RenderJobResult(job, "failed", 1, 0.0, "任务未返回执行结果，请检查主进程日志。")
+        ordered_results.append(result)
+    textures_enabled = not bool(getattr(args, "skip_textures", False))
+    result_records = [
+        build_model_result_record(result, textures_enabled=textures_enabled) for result in ordered_results
+    ]
+    rendered = sum(item["status"] == "success" for item in result_records)
+    skipped = sum(item["status"] == "skipped_existing" for item in result_records)
+    failed = sum(item["status"] == "failed" for item in result_records)
+    texture_issues = sum(
+        bool(item["textures"]["missing"] or item["textures"]["error"]) for item in result_records
+    )
+    preprocess_incomplete = any(
+        item.get("operation") in {"archive_unpack", "rpf_unpack"}
+        and (
+            item.get("status") == "failed"
+            or (item.get("status") == "skipped" and int(item.get("detected", 0) or 0) > 0)
+        )
+        for item in operations
+    )
+    if status_override:
+        status = status_override
+    elif failed == 0 and jobs and not preprocess_incomplete:
+        status = "success"
+    elif rendered or skipped:
+        status = "partial_success"
+    else:
+        status = "failed"
+
+    notes = [
+        "渲染器只读取输入资源；截图、日志、任务文件和报告均写入输出目录。",
+        "“成功”表示最终 PNG 已生成；画面、构图和材质是否符合预期仍建议人工抽查。",
+        "每次报告永久保存在 _reports；输出根目录的 _render_report.md/.json 会更新为最近一次。",
+    ]
+    if getattr(args, "force", False):
+        notes.append("本次启用了强制渲染；同名旧截图会在任务开始前被替换。")
+    if getattr(args, "skip_existing", False):
+        notes.append("本次允许跳过已有截图；报告把这些模型单独标记为“跳过”，不计作新渲染。")
+    if texture_issues:
+        notes.append("贴图缺失不一定导致 Blender 失败，但可能出现白模、错色或材质不完整，请按逐模型明细补齐 YTD。")
+    if failed:
+        notes.append("失败模型没有被当作成功；优先查看逐模型 Blender 日志中的最后一条异常。")
+    if getattr(args, "keep_work", False):
+        notes.append("本次保留了 _work 中间目录，可用于复查压缩包、RPF 和贴图转换过程；确认无用后可手动删除。")
+    if getattr(args, "cutout", False):
+        notes.append("根目录 PNG 是裁边透明图；_alpha 是完整画布透明图；_greenscreen 是绿幕预览。")
+    if any(item.get("status") in {"failed", "skipped"} for item in operations):
+        notes.append("预处理存在失败或跳过项；未成功解包的压缩包/RPF 不会进入模型扫描。")
+
+    report: dict[str, object] = {
+        "report_type": "model_render_execution",
+        "report_version": 1,
+        "run_id": run_id,
+        "status": status,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "duration_seconds": round(max(0.0, time.monotonic() - started_monotonic), 3),
+        "input": {
+            "path": str(input_path),
+            "kind": "file" if input_path.is_file() else "directory",
+        },
+        "output": {"path": str(out_dir)},
+        "environment": {
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+            "python_executable": sys.executable,
+            "blender": str(blender) if blender else "",
+            "blender_version": blender_label,
+            "sollumz": str(getattr(args, "sollumz", "") or ""),
+            "ytd_tool": str(getattr(args, "ytd_tool_path", "") or ""),
+            "rpf_tool": str(getattr(args, "rpf_tool_path", "") or ""),
+            "archive_tool": str(getattr(args, "archive_tool_path", "") or ""),
+        },
+        "request": {
+            "selected_models": list(getattr(args, "model", []) or []),
+            "asset_types": str(getattr(args, "asset_types", "")),
+            "workers": max(1, int(getattr(args, "workers", 1))),
+            "render": {
+                "width": int(getattr(args, "width", 0)),
+                "height": int(getattr(args, "height", 0)),
+                "samples": int(getattr(args, "samples", 0)),
+                "engine": str(getattr(args, "engine", "")),
+                "engine_auto": bool(getattr(args, "engine_auto", False)),
+                "model_tone": str(getattr(args, "model_tone", "")),
+                "cutout": bool(getattr(args, "cutout", False)),
+                "perspective": bool(getattr(args, "perspective", False)),
+                "timeout_seconds": int(getattr(args, "timeout", 0)),
+            },
+            "textures": {
+                "enabled": not bool(getattr(args, "skip_textures", False)),
+                "format": str(getattr(args, "texture_format", "")),
+                "ytd_mode": str(getattr(args, "ytd_mode", "")),
+                "shared_ytd": [str(path) for path in getattr(args, "shared_ytd_paths", ())],
+            },
+            "input_processing": {
+                "auto_unpack": not bool(getattr(args, "no_unpack", False)),
+                "keep_work": bool(getattr(args, "keep_work", False)),
+                "force": bool(getattr(args, "force", False)),
+                "skip_existing": bool(getattr(args, "skip_existing", False)),
+            },
+        },
+        "summary": {
+            "jobs": len(jobs),
+            "rendered": rendered,
+            "skipped": skipped,
+            "failed": failed,
+            "texture_issues": texture_issues,
+        },
+        "operations": operations,
+        "results": result_records,
+        "artifacts": {
+            "logs_directory": str(out_dir / "_logs"),
+            "jobs_directory": str(out_dir / "_jobs"),
+            "texture_report_json": str(out_dir / "_texture_report.json")
+            if (out_dir / "_texture_report.json").is_file()
+            else "",
+            "texture_report_text": str(out_dir / "_texture_report.txt")
+            if (out_dir / "_texture_report.txt").is_file()
+            else "",
+        },
+        "notes": notes,
+        "error": error,
+        "reports": {name: str(path) for name, path in paths.items()},
+    }
+    json_text = json.dumps(report, indent=2, ensure_ascii=False) + "\n"
+    markdown_text = build_model_render_markdown(report)
+    atomic_write_text(paths["history_json"], json_text)
+    atomic_write_text(paths["history_markdown"], markdown_text)
+    atomic_write_text(paths["latest_json"], json_text)
+    atomic_write_text(paths["latest_markdown"], markdown_text)
+    return paths
+
+
+def emit_model_render_execution_report(**kwargs) -> dict[str, Path] | None:
+    try:
+        paths = write_model_render_execution_report(**kwargs)
+    except Exception as exc:
+        print(f"[report-error] 无法生成模型执行报告: {exc}", file=sys.stderr, flush=True)
+        return None
+    print(f"[report] markdown={paths['latest_markdown']}", flush=True)
+    print(f"[report] json={paths['latest_json']}", flush=True)
+    print(f"[report] history={paths['history_markdown']}", flush=True)
+    return paths
+
+
+def cleanup_run_workspace(
+    temp_root: Path,
+    temp_root_obj: tempfile.TemporaryDirectory | None,
+    temp_parent: Path,
+    keep_work: bool,
+    operations: list[dict[str, object]],
+) -> None:
+    if keep_work and temp_root.exists():
+        print(f"Work folder kept: {temp_root}")
+        append_operation(operations, "temp_workspace", "kept", path=str(temp_root))
+        return
+    if temp_root_obj is None:
+        return
+    try:
+        temp_root_obj.cleanup()
+        try:
+            temp_parent.rmdir()
+        except OSError:
+            pass
+        append_operation(operations, "temp_workspace", "cleaned", path=str(temp_root))
+    except OSError as exc:
+        append_operation(operations, "temp_workspace", "failed", path=str(temp_root), reason=str(exc))
 
 
 def run_green_key(blender: Path, args) -> int:
@@ -1144,6 +1687,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    run_started_at = datetime.now().astimezone()
+    run_started_monotonic = time.monotonic()
+    run_id = uuid.uuid4().hex[:10]
     args.engine_auto = args.engine is None
     args.yaw_auto = args.yaw is None
     args.exposure_auto = args.exposure is None
@@ -1195,15 +1741,39 @@ def main(argv: list[str]) -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     textures_root.mkdir(parents=True, exist_ok=True)
     args.textures_root = textures_root.resolve()
+    args.ytd_tool_path = None
+    args.texconv_path = None
+    args.rpf_tool_path = None
+    args.archive_tool_path = None
+    operation_records: list[dict[str, object]] = []
+    jobs: list[VehicleJob] = []
+    job_results: list[RenderJobResult] = []
+
+    def emit_report(status_override: str = "", error: str = "") -> dict[str, Path] | None:
+        return emit_model_render_execution_report(
+            out_dir=out_dir,
+            run_id=run_id,
+            started_at=run_started_at,
+            started_monotonic=run_started_monotonic,
+            input_path=input_dir,
+            args=args,
+            blender=blender,
+            blender_label=blender_label,
+            jobs=jobs,
+            results=job_results,
+            operations=operation_records,
+            status_override=status_override,
+            error=error,
+        )
+
 
     try:
         require_free_disk_space(out_dir, "运行目录")
     except (FileNotFoundError, OSError, RuntimeError) as exc:
         print(f"[disk] {exc}", file=sys.stderr, flush=True)
+        emit_report("failed", str(exc))
         return 1
 
-    args.ytd_tool_path = None
-    args.texconv_path = None
     if not args.skip_textures:
         args.ytd_tool_path = find_support_tool(args.ytd_tool, "YtdTools.exe")
         args.texconv_path = find_support_tool(args.texconv, "texconv.exe")
@@ -1236,12 +1806,51 @@ def main(argv: list[str]) -> int:
     scan_roots = [] if input_dir.is_file() else [input_dir]
     if not args.no_unpack:
         archive_tool = find_archive_tool(args.archive_tool)
-        scan_roots.extend(unpack_archives(input_dir, temp_root, archive_tool))
+        args.archive_tool_path = archive_tool
+        scan_roots.extend(unpack_archives(input_dir, temp_root, archive_tool, operation_records))
         rpf_tool = find_rpf_tool(args.rpf_tool)
+        args.rpf_tool_path = rpf_tool
         if rpf_tool:
-            scan_roots.extend(unpack_rpfs(scan_roots, temp_root, rpf_tool))
-        elif any(root.rglob("*.rpf") for root in scan_roots):
-            print("[rpf] RpfTools.exe not found; skip .rpf unpack")
+            scan_roots.extend(unpack_rpfs(scan_roots, temp_root, rpf_tool, operation_records))
+        else:
+            rpf_files = sorted(
+                {
+                    str(path.resolve())
+                    for root in scan_roots
+                    for path in root.rglob("*.rpf")
+                    if path.is_file()
+                }
+            )
+            if rpf_files:
+                print("[rpf] RpfTools.exe not found; skip .rpf unpack")
+                append_operation(
+                    operation_records,
+                    "rpf_unpack",
+                    "skipped",
+                    detected=len(rpf_files),
+                    reason="RpfTools.exe 不可用，未执行 RPF 解包。",
+                )
+            else:
+                append_operation(
+                    operation_records,
+                    "rpf_unpack",
+                    "not_needed",
+                    detected=0,
+                    note="扫描范围内未发现 RPF。",
+                )
+    else:
+        append_operation(
+            operation_records,
+            "archive_unpack",
+            "skipped",
+            reason="本次启用了 --no-unpack，未检查或解包压缩包。",
+        )
+        append_operation(
+            operation_records,
+            "rpf_unpack",
+            "skipped",
+            reason="本次启用了 --no-unpack，未检查或解包 RPF。",
+        )
 
     selected_models = {m.lower() for m in args.model} if args.model else None
     asset_types = parse_asset_types(args.asset_types)
@@ -1259,7 +1868,19 @@ def main(argv: list[str]) -> int:
             unique_assets.append((asset, asset_kind))
 
     if not unique_assets:
-        print("No renderable assets found (.yft/.ydr/.ydd/.ymap).")
+        message = "No renderable assets found (.yft/.ydr/.ydd/.ymap)."
+        print(message)
+        append_operation(
+            operation_records,
+            "input_scan",
+            "failed",
+            scan_roots=len(scan_roots),
+            discovered=len(assets),
+            jobs=0,
+            reason=message,
+        )
+        cleanup_run_workspace(temp_root, temp_root_obj, temp_parent, args.keep_work, operation_records)
+        emit_report("failed", message)
         return 1
 
     unique_assets = [
@@ -1268,10 +1889,31 @@ def main(argv: list[str]) -> int:
     ]
     unique_assets = filter_classified_assets(unique_assets, args.asset_types)
     if not unique_assets:
-        print(f"No assets matched --asset-types {args.asset_types!r} after classification.")
+        message = f"No assets matched --asset-types {args.asset_types!r} after classification."
+        print(message)
+        append_operation(
+            operation_records,
+            "input_scan",
+            "failed",
+            scan_roots=len(scan_roots),
+            discovered=len(assets),
+            jobs=0,
+            reason=message,
+        )
+        cleanup_run_workspace(temp_root, temp_root_obj, temp_parent, args.keep_work, operation_records)
+        emit_report("failed", message)
         return 1
 
     jobs = [write_job_file(args, asset, asset_kind, jobs_dir, logs_dir, out_dir) for asset, asset_kind in unique_assets]
+    append_operation(
+        operation_records,
+        "input_scan",
+        "completed",
+        scan_roots=len(scan_roots),
+        discovered=len(assets),
+        jobs=len(jobs),
+        asset_types=sorted(asset_types),
+    )
     workers = max(1, args.workers)
 
     print(f"Blender: {blender} ({blender_label})")
@@ -1289,39 +1931,82 @@ def main(argv: list[str]) -> int:
         if args.cutout_width or args.cutout_height:
             print(f"Cutout minimum: {max(args.cutout_width, 0)}x{max(args.cutout_height, 0)} (aspect ratio preserved)")
 
-    failures: list[tuple[str, int]] = []
+    failures: list[RenderJobResult] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(run_blender_job, blender, job, args) for job in jobs]
-        for future in concurrent.futures.as_completed(futures):
-            model, rc, elapsed, message = future.result()
-            if rc == 0:
-                print(f"[ok] {model} {elapsed:.1f}s")
+        future_jobs = {executor.submit(run_blender_job, blender, job, args): job for job in jobs}
+        for future in concurrent.futures.as_completed(future_jobs):
+            job = future_jobs[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                message = f"\u6a21\u578b\u4efb\u52a1\u5f02\u5e38\u9000\u51fa\uff1a{exc}"
+                result = RenderJobResult(job, "failed", 1, 0.0, message)
+            job_results.append(result)
+            if result.status == "success":
+                print(f"[ok] {result.job.model} {result.elapsed_seconds:.1f}s")
+            elif result.status == "skipped_existing":
+                print(f"[skip] {result.job.model} existing output")
             else:
-                suffix = f" - {message}" if message else ""
-                print(f"[fail] {model} rc={rc} {elapsed:.1f}s{suffix}")
-                failures.append((model, rc))
+                suffix = f" - {result.message}" if result.message else ""
+                print(
+                    f"[fail] {result.job.model} rc={result.return_code} "
+                    f"{result.elapsed_seconds:.1f}s{suffix}"
+                )
+                failures.append(result)
+    append_operation(
+        operation_records,
+        "blender_render",
+        "failed" if len(failures) == len(jobs) else "completed",
+        success=sum(result.status == "success" for result in job_results),
+        skipped=sum(result.status == "skipped_existing" for result in job_results),
+        failed=len(failures),
+    )
 
     texture_issue_count = 0
+    auxiliary_error = ""
     if not args.skip_textures:
-        texture_issue_count = write_texture_summary_report(jobs, out_dir)
-        texture_report_path = out_dir / "_texture_report.txt"
-        if texture_issue_count:
-            print(f"[textures] issues={texture_issue_count}; report={texture_report_path}")
-        else:
-            print(f"[textures] report={texture_report_path}")
-
-    if args.keep_work and temp_root.exists():
-        print(f"Work folder kept: {temp_root}")
-    elif temp_root_obj is not None:
-        temp_root_obj.cleanup()
         try:
-            temp_parent.rmdir()
-        except OSError:
-            pass
+            texture_issue_count = write_texture_summary_report(jobs, out_dir)
+            texture_report_path = out_dir / "_texture_report.txt"
+            if texture_issue_count:
+                print(f"[textures] issues={texture_issue_count}; report={texture_report_path}")
+            else:
+                print(f"[textures] report={texture_report_path}")
+            append_operation(
+                operation_records,
+                "texture_report",
+                "completed",
+                issues=texture_issue_count,
+                report=str(texture_report_path),
+            )
+        except Exception as exc:
+            auxiliary_error = f"\u8d34\u56fe\u6c47\u603b\u62a5\u544a\u751f\u6210\u5931\u8d25\uff1a{exc}"
+            print(f"[textures] {auxiliary_error}", file=sys.stderr, flush=True)
+            append_operation(
+                operation_records,
+                "texture_report",
+                "failed",
+                issues=0,
+                reason=auxiliary_error,
+            )
+    else:
+        append_operation(
+            operation_records,
+            "texture_report",
+            "skipped",
+            issues=0,
+            reason="\u672c\u6b21\u542f\u7528\u4e86 --skip-textures\u3002",
+        )
+
+    cleanup_run_workspace(temp_root, temp_root_obj, temp_parent, args.keep_work, operation_records)
+    status_override = "partial_success" if auxiliary_error and not failures else ""
+    report_paths = emit_report(status_override, auxiliary_error)
+    report_failed = report_paths is None
 
     print(f"Done. OK={len(jobs) - len(failures)} FAIL={len(failures)}")
     if failures:
         print(f"Logs: {logs_dir}")
+    if failures or auxiliary_error or report_failed:
         return 1
     return 0
 

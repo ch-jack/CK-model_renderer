@@ -117,9 +117,19 @@ _vehicle_renders/
   _logs/model.textures.bind.json
   _texture_report.txt
   _texture_report.json
+  _render_report.md            # Latest human-readable execution report
+  _render_report.json          # Latest machine-readable execution report
+  _reports/model-render-*.md   # Preserved report for every run
+  _reports/model-render-*.json
 ```
 
 运行期间还会创建 `_temp` 保存压缩包、RPF 和 YTD 中间文件；正常结束后自动删除。使用 `--keep-work` 时，中间文件改为保留在 `_work`。
+
+## Per-run execution report
+
+Every batch run writes a model-rendering-specific Markdown report and JSON report. The report records the input and output paths, requested render/cutout/texture settings, archive and RPF preprocessing, Blender/Python environment, and the exact status, elapsed time, screenshot artifacts, texture findings, error, and log path for every model.
+
+Reports under `_reports` are never overwritten. `_render_report.md` and `_render_report.json` are refreshed as the latest-report shortcuts. Expected failures such as no matching assets and low output-disk space also produce a failure report once the output directory is available. `_texture_report.*` remains the detailed texture sub-report and is linked from the execution report.
 
 ## 贴图报告
 
