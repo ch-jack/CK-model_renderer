@@ -8,6 +8,9 @@ from pathlib import Path
 
 VEHICLE_META_FILES = ("vehicles.meta", "carvariations.meta", "carcols.meta")
 XML_COMMENT_PATTERN = re.compile(r"<!--[\s\S]*?-->")
+XML_DECLARATION_PATTERN = re.compile(r"<\?xml[\s\S]*?\?>", re.IGNORECASE)
+XML_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+MODEL_NAME_PATTERN = re.compile(r"<modelName(?:\s[^>]*)?>([\s\S]*?)</modelName>", re.IGNORECASE)
 
 
 def clean_model_name(name: str) -> str:
@@ -80,15 +83,35 @@ def read_xml(path: Path) -> ET.Element | None:
             text = data.decode("utf-16", errors="replace")
         else:
             text = data.decode("utf-8-sig", errors="replace")
-        sanitized = XML_COMMENT_PATTERN.sub("", text)
-        try:
-            root = ET.fromstring(sanitized)
-        except ET.ParseError as sanitized_exc:
-            raise RuntimeError(
-                f"Invalid XML: {path}: {exc}; still invalid after removing comments: {sanitized_exc}"
-            ) from sanitized_exc
-        print(f"[metadata] ignored invalid XML comments: {path}", flush=True)
-        return root
+        sanitized = XML_CONTROL_PATTERN.sub("", XML_DECLARATION_PATTERN.sub("", XML_COMMENT_PATTERN.sub("", text)))
+        for candidate in (sanitized, f"<ck_metadata_root>{sanitized}</ck_metadata_root>"):
+            try:
+                root = ET.fromstring(candidate)
+                print(f"[metadata] repaired malformed XML in memory: {path}", flush=True)
+                return root
+            except ET.ParseError:
+                pass
+
+        if path.name.lower() in {"vehicles.meta", "carvariations.meta"}:
+            model_names = []
+            seen: set[str] = set()
+            for match in MODEL_NAME_PATTERN.finditer(text):
+                model = match.group(1).strip()
+                key = model.lower()
+                if model and key not in seen:
+                    seen.add(key)
+                    model_names.append(model)
+            if model_names:
+                root = ET.Element("ck_metadata_root")
+                container = ET.SubElement(root, "variationData" if path.name.lower() == "carvariations.meta" else "InitDatas")
+                for model in model_names:
+                    item = ET.SubElement(container, "Item")
+                    ET.SubElement(item, "modelName").text = model
+                print(f"[metadata] recovered {len(model_names)} model names from malformed XML: {path}", flush=True)
+                return root
+
+        print(f"[metadata] skipped malformed XML: {path}: {exc}", flush=True)
+        return None
 
 
 def text_of(node: ET.Element | None, name: str) -> str:

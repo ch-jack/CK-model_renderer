@@ -261,6 +261,10 @@ class LargeBatchProgressTests(unittest.TestCase):
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 "<CVehicleModelInfo__InitDataList><!-- pack--vip --><InitDatas><Item>"
                 "<modelName>base_car</modelName>"
+                "</Item></InitDatas></CVehicleModelInfo__InitDataList>"
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                "<CVehicleModelInfo__InitDataList><InitDatas><Item>"
+                "<modelName>base_car</modelName>"
                 "</Item></InitDatas></CVehicleModelInfo__InitDataList>",
                 encoding="utf-8",
             )
@@ -276,12 +280,26 @@ class LargeBatchProgressTests(unittest.TestCase):
             (stream / "base_car_dryclutch_1.yft").write_bytes(b"")
             (resource / "stream" / "flat_car.yft").write_bytes(b"")
             (resource / "stream" / "flat_car_spoiler_1.yft").write_bytes(b"")
+            damaged_metadata = resource / "data" / "damaged"
+            damaged_metadata.mkdir(parents=True)
+            (damaged_metadata / "vehicles.meta").write_text(
+                "garbage <broken <modelName>recovered_car</modelName>",
+                encoding="utf-8",
+            )
+            damaged_stream = resource / "stream" / "damaged"
+            damaged_stream.mkdir()
+            (damaged_stream / "recovered_car.yft").write_bytes(b"")
+            (damaged_stream / "recovered_car_part_1.yft").write_bytes(b"")
 
             assets = scan_render_assets(Path(temp_dir), None, {"vehicle"})
 
-            self.assertEqual({(path.stem, kind) for path, kind in assets}, {("base_car", "vehicle"), ("flat_car", "vehicle")})
+            self.assertEqual(
+                {(path.stem, kind) for path, kind in assets},
+                {("base_car", "vehicle"), ("flat_car", "vehicle"), ("recovered_car", "vehicle")},
+            )
             self.assertEqual(vehicle_resource_root(stream, "base_car"), metadata.resolve())
             self.assertEqual(vehicle_resource_root(resource / "stream", "flat_car"), flat_metadata.resolve())
+            self.assertEqual(vehicle_resource_root(damaged_stream, "recovered_car"), damaged_metadata.resolve())
 
     def test_walk_input_files_prunes_generated_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
