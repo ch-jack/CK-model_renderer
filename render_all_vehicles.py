@@ -19,7 +19,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from vehicle_assembly import build_assembly_plan, parse_vehicle_models, vehicle_resource_root, vehicle_resource_roots
+from vehicle_assembly import (
+    build_assembly_plan,
+    parse_vehicle_models,
+    parse_vehicle_part_models,
+    vehicle_resource_root,
+    vehicle_resource_roots,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -279,19 +285,28 @@ def load_model_selection(model_args: list[str], model_file: str = "") -> list[st
 def choose_vehicle_yfts(all_yfts: list[Path], selected_models: set[str] | None) -> list[Path]:
     by_model: dict[str, dict[str, Path]] = {}
     resource_models: dict[Path, set[str] | None] = {}
+    resource_parts: dict[Path, set[str]] = {}
     for yft in all_yfts:
         model = clean_model_name(yft)
         if selected_models and model.lower() not in selected_models:
             continue
         source_dir = yft.parent.resolve()
         if source_dir not in resource_models:
+            resource_roots = vehicle_resource_roots(source_dir)
             metadata_models = [
                 model
-                for resource_root in vehicle_resource_roots(source_dir)
+                for resource_root in resource_roots
                 for model in parse_vehicle_models(resource_root, source_dir)
             ]
             resource_models[source_dir] = {name.lower() for name in metadata_models} if metadata_models else None
+            resource_parts[source_dir] = {
+                model.lower()
+                for resource_root in resource_roots
+                for model in parse_vehicle_part_models(resource_root, source_dir)
+            }
         metadata_models = resource_models[source_dir]
+        if model.lower() in resource_parts[source_dir]:
+            continue
         if metadata_models is not None and model.lower() not in metadata_models:
             continue
         slot = by_model.setdefault(model.lower(), {})

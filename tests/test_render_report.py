@@ -291,11 +291,32 @@ class LargeBatchProgressTests(unittest.TestCase):
             (damaged_stream / "recovered_car.yft").write_bytes(b"")
             (damaged_stream / "recovered_car_part_1.yft").write_bytes(b"")
 
+            parts_only = Path(temp_dir) / "parts_only_pack"
+            parts_stream = parts_only / "stream" / "kit"
+            parts_stream.mkdir(parents=True)
+            parts_metadata = parts_only / "data" / "kit"
+            parts_metadata.mkdir(parents=True)
+            (parts_metadata / "carcols.meta").write_text(
+                "<CVehicleModelInfo__InitDataList><Kits><Item><visibleMods>"
+                "<Item><modelName>orphan_car_grill_4a</modelName></Item>"
+                "<Item><modelName>orphan_car_roof_1</modelName>"
+                "<linkedModels><Item>orphan_car_tips</Item></linkedModels></Item>"
+                "</visibleMods></Item></Kits></CVehicleModelInfo__InitDataList>",
+                encoding="utf-8",
+            )
+            for name in ("orphan_car", "orphan_car_grill_4a", "orphan_car_roof_1", "orphan_car_tips"):
+                (parts_stream / f"{name}.yft").write_bytes(b"")
+
             assets = scan_render_assets(Path(temp_dir), None, {"vehicle"})
 
             self.assertEqual(
                 {(path.stem, kind) for path, kind in assets},
-                {("base_car", "vehicle"), ("flat_car", "vehicle"), ("recovered_car", "vehicle")},
+                {
+                    ("base_car", "vehicle"),
+                    ("flat_car", "vehicle"),
+                    ("orphan_car", "vehicle"),
+                    ("recovered_car", "vehicle"),
+                },
             )
             self.assertEqual(vehicle_resource_root(stream, "base_car"), metadata.resolve())
             self.assertEqual(vehicle_resource_root(resource / "stream", "flat_car"), flat_metadata.resolve())

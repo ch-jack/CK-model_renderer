@@ -92,7 +92,7 @@ def read_xml(path: Path) -> ET.Element | None:
             except ET.ParseError:
                 pass
 
-        if path.name.lower() in {"vehicles.meta", "carvariations.meta"}:
+        if path.name.lower() in {"vehicles.meta", "carvariations.meta", "carcols.meta"}:
             model_names = []
             seen: set[str] = set()
             for match in MODEL_NAME_PATTERN.finditer(text):
@@ -103,7 +103,14 @@ def read_xml(path: Path) -> ET.Element | None:
                     model_names.append(model)
             if model_names:
                 root = ET.Element("ck_metadata_root")
-                container = ET.SubElement(root, "variationData" if path.name.lower() == "carvariations.meta" else "InitDatas")
+                if path.name.lower() == "carcols.meta":
+                    kits = ET.SubElement(root, "Kits")
+                    kit = ET.SubElement(kits, "Item")
+                    container = ET.SubElement(kit, "visibleMods")
+                else:
+                    container = ET.SubElement(
+                        root, "variationData" if path.name.lower() == "carvariations.meta" else "InitDatas"
+                    )
                 for model in model_names:
                     item = ET.SubElement(container, "Item")
                     ET.SubElement(item, "modelName").text = model
@@ -201,6 +208,40 @@ def _parse_vehicle_models(resource_root: Path, stream_dir: Path) -> tuple[str, .
 
 def parse_vehicle_models(resource_root: Path, stream_dir: Path) -> list[str]:
     return list(_parse_vehicle_models(resource_root.resolve(), stream_dir.resolve()))
+
+
+@lru_cache(maxsize=None)
+def _parse_vehicle_part_models(resource_root: Path, stream_dir: Path) -> tuple[str, ...]:
+    available = stream_yft_map(stream_dir)
+    root = read_xml(resource_root / "carcols.meta")
+    if root is None:
+        return ()
+    candidates = [
+        (node.text or "").strip()
+        for node in root.findall(
+            ".//Kits/Item/visibleMods/Item/modelName"
+        )
+    ]
+    candidates.extend(
+        (node.text or "").strip()
+        for node in root.findall(".//Kits/Item/linkMods/Item/modelName")
+    )
+    candidates.extend(
+        (node.text or "").strip()
+        for node in root.findall(".//linkedModels/Item")
+    )
+    parts: list[str] = []
+    seen: set[str] = set()
+    for model in candidates:
+        key = model.lower()
+        if model and key in available and key not in seen:
+            seen.add(key)
+            parts.append(model)
+    return tuple(parts)
+
+
+def parse_vehicle_part_models(resource_root: Path, stream_dir: Path) -> list[str]:
+    return list(_parse_vehicle_part_models(resource_root.resolve(), stream_dir.resolve()))
 
 
 def parse_kits(resource_root: Path) -> dict[str, dict[str, object]]:
