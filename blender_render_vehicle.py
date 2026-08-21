@@ -2537,6 +2537,15 @@ def standard_wheel_anchor(armature, key):
     return None
 
 
+def parent_armature(obj):
+    current = obj.parent if obj is not None else None
+    while current is not None:
+        if current.type == "ARMATURE":
+            return current
+        current = current.parent
+    return None
+
+
 def complete_missing_wheels():
     created = 0
     objects = bpy.data.objects
@@ -2545,7 +2554,14 @@ def complete_missing_wheels():
         for key in ("lf", "rf", "lr", "rr")
         if objects.get(f"wheel_{key}.child") is not None
     }
-    armature = next((mesh_armature(obj) for obj in wheel_objects.values() if mesh_armature(obj)), None)
+    armature = next(
+        (
+            parent_armature(obj) or mesh_armature(obj)
+            for obj in wheel_objects.values()
+            if parent_armature(obj) or mesh_armature(obj)
+        ),
+        None,
+    )
     anchors = {key: standard_wheel_anchor(armature, key) for key in ("lf", "rf", "lr", "rr")}
     available_targets = tuple(key for key, anchor in anchors.items() if anchor is not None)
     plans = plan_missing_wheel_clones(set(wheel_objects), available_targets)

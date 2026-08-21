@@ -259,6 +259,9 @@ class LargeBatchProgressTests(unittest.TestCase):
                 ("rf", "rr", False),
             ],
         )
+        source = (Path(__file__).resolve().parents[1] / "blender_render_vehicle.py").read_text(encoding="utf-8")
+        self.assertIn("def parent_armature(obj):", source)
+        self.assertIn("current = current.parent", source)
 
     def test_black_paint_uses_glossy_dark_preset(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "blender_render_vehicle.py").read_text(encoding="utf-8")
