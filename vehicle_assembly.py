@@ -6,11 +6,12 @@ from functools import lru_cache
 from pathlib import Path
 
 
-VEHICLE_META_FILES = ("vehicles.meta", "carvariations.meta", "carcols.meta")
+VEHICLE_META_FILES = ("vehicles.meta", "handling.meta", "carvariations.meta", "carcols.meta")
 XML_COMMENT_PATTERN = re.compile(r"<!--[\s\S]*?-->")
 XML_DECLARATION_PATTERN = re.compile(r"<\?xml[\s\S]*?\?>", re.IGNORECASE)
 XML_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 MODEL_NAME_PATTERN = re.compile(r"<modelName(?:\s[^>]*)?>([\s\S]*?)</modelName>", re.IGNORECASE)
+HANDLING_NAME_PATTERN = re.compile(r"<handlingName(?:\s[^>]*)?>([\s\S]*?)</handlingName>", re.IGNORECASE)
 
 
 def clean_model_name(name: str) -> str:
@@ -92,10 +93,11 @@ def read_xml(path: Path) -> ET.Element | None:
             except ET.ParseError:
                 pass
 
-        if path.name.lower() in {"vehicles.meta", "carvariations.meta", "carcols.meta"}:
+        if path.name.lower() in {"vehicles.meta", "handling.meta", "carvariations.meta", "carcols.meta"}:
             model_names = []
             seen: set[str] = set()
-            for match in MODEL_NAME_PATTERN.finditer(text):
+            name_pattern = HANDLING_NAME_PATTERN if path.name.lower() == "handling.meta" else MODEL_NAME_PATTERN
+            for match in name_pattern.finditer(text):
                 model = match.group(1).strip()
                 key = model.lower()
                 if model and key not in seen:
@@ -103,7 +105,9 @@ def read_xml(path: Path) -> ET.Element | None:
                     model_names.append(model)
             if model_names:
                 root = ET.Element("ck_metadata_root")
-                if path.name.lower() == "carcols.meta":
+                if path.name.lower() == "handling.meta":
+                    container = ET.SubElement(root, "HandlingData")
+                elif path.name.lower() == "carcols.meta":
                     kits = ET.SubElement(root, "Kits")
                     kit = ET.SubElement(kits, "Item")
                     container = ET.SubElement(kit, "visibleMods")
@@ -113,7 +117,7 @@ def read_xml(path: Path) -> ET.Element | None:
                     )
                 for model in model_names:
                     item = ET.SubElement(container, "Item")
-                    ET.SubElement(item, "modelName").text = model
+                    ET.SubElement(item, "handlingName" if path.name.lower() == "handling.meta" else "modelName").text = model
                 print(f"[metadata] recovered {len(model_names)} model names from malformed XML: {path}", flush=True)
                 return root
 
@@ -183,18 +187,25 @@ def stream_yft_map(stream_dir: Path) -> dict[str, str]:
 @lru_cache(maxsize=None)
 def _parse_vehicle_models(resource_root: Path, stream_dir: Path) -> tuple[str, ...]:
     available = stream_yft_map(stream_dir)
-    models: list[str] = []
-    for meta_name, query in (
-        ("carvariations.meta", ".//variationData/Item/modelName"),
-        ("vehicles.meta", ".//InitDatas/Item/modelName"),
-    ):
-        root = read_xml(resource_root / meta_name)
-        if root is None:
-            continue
-        for node in root.findall(query):
-            value = (node.text or "").strip()
-            if value:
-                models.append(value)
+    vehicles_root = read_xml(resource_root / "vehicles.meta")
+    if vehicles_root is None:
+        return ()
+    vehicle_models = [
+        (node.text or "").strip()
+        for node in vehicles_root.findall(".//InitDatas/Item/modelName")
+        if (node.text or "").strip()
+    ]
+    handling_root = read_xml(resource_root / "handling.meta")
+    handling_names = (
+        {
+            (node.text or "").strip().lower()
+            for node in handling_root.findall(".//HandlingData/Item/handlingName")
+            if (node.text or "").strip()
+        }
+        if handling_root is not None
+        else set()
+    )
+    models = [model for model in vehicle_models if not handling_names or model.lower() in handling_names]
 
     out: list[str] = []
     seen: set[str] = set()
@@ -213,28 +224,20 @@ def parse_vehicle_models(resource_root: Path, stream_dir: Path) -> list[str]:
 @lru_cache(maxsize=None)
 def _parse_vehicle_part_models(resource_root: Path, stream_dir: Path) -> tuple[str, ...]:
     available = stream_yft_map(stream_dir)
-    root = read_xml(resource_root / "carcols.meta")
+    root = read_xml(resource_root / "carvariations.meta")
     if root is None:
         return ()
-    candidates = [
+    candidates = {
         (node.text or "").strip()
-        for node in root.findall(
-            ".//Kits/Item/visibleMods/Item/modelName"
-        )
-    ]
-    candidates.extend(
-        (node.text or "").strip()
-        for node in root.findall(".//Kits/Item/linkMods/Item/modelName")
-    )
-    candidates.extend(
-        (node.text or "").strip()
-        for node in root.findall(".//linkedModels/Item")
-    )
+        for node in root.findall(".//variationData/Item/modelName")
+        if (node.text or "").strip()
+    }
+    base_models = {model.lower() for model in parse_vehicle_models(resource_root, stream_dir)}
     parts: list[str] = []
     seen: set[str] = set()
     for model in candidates:
         key = model.lower()
-        if model and key in available and key not in seen:
+        if model and key in available and key not in base_models and key not in seen:
             seen.add(key)
             parts.append(model)
     return tuple(parts)

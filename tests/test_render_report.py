@@ -261,11 +261,23 @@ class LargeBatchProgressTests(unittest.TestCase):
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 "<CVehicleModelInfo__InitDataList><!-- pack--vip --><InitDatas><Item>"
                 "<modelName>base_car</modelName>"
+                "</Item><Item><modelName>base_car_dryclutch_1</modelName>"
                 "</Item></InitDatas></CVehicleModelInfo__InitDataList>"
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 "<CVehicleModelInfo__InitDataList><InitDatas><Item>"
                 "<modelName>base_car</modelName>"
                 "</Item></InitDatas></CVehicleModelInfo__InitDataList>",
+                encoding="utf-8",
+            )
+            (metadata / "handling.meta").write_text(
+                "<CHandlingDataMgr><HandlingData><Item><handlingName>BASE_CAR</handlingName>"
+                "</Item></HandlingData></CHandlingDataMgr>",
+                encoding="utf-8",
+            )
+            (metadata / "carvariations.meta").write_text(
+                "<CVehicleModelInfoVariation><variationData><Item>"
+                "<modelName>base_car_dryclutch_1</modelName>"
+                "</Item></variationData></CVehicleModelInfoVariation>",
                 encoding="utf-8",
             )
             flat_metadata = resource / "data" / "flat"
@@ -274,6 +286,17 @@ class LargeBatchProgressTests(unittest.TestCase):
                 "<CVehicleModelInfo__InitDataList><InitDatas><Item>"
                 "<modelName>flat_car</modelName>"
                 "</Item></InitDatas></CVehicleModelInfo__InitDataList>",
+                encoding="utf-8",
+            )
+            (flat_metadata / "handling.meta").write_text(
+                "<CHandlingDataMgr><HandlingData><Item><handlingName>flat_car</handlingName>"
+                "</Item></HandlingData></CHandlingDataMgr>",
+                encoding="utf-8",
+            )
+            (flat_metadata / "carvariations.meta").write_text(
+                "<CVehicleModelInfoVariation><variationData><Item>"
+                "<modelName>flat_car_spoiler_1</modelName>"
+                "</Item></variationData></CVehicleModelInfoVariation>",
                 encoding="utf-8",
             )
             (stream / "base_car.yft").write_bytes(b"")
@@ -286,6 +309,17 @@ class LargeBatchProgressTests(unittest.TestCase):
                 "garbage <broken <modelName>recovered_car</modelName>",
                 encoding="utf-8",
             )
+            (damaged_metadata / "handling.meta").write_text(
+                "<CHandlingDataMgr><HandlingData><Item><handlingName>recovered_car</handlingName>"
+                "</Item></HandlingData></CHandlingDataMgr>",
+                encoding="utf-8",
+            )
+            (damaged_metadata / "carvariations.meta").write_text(
+                "<CVehicleModelInfoVariation><variationData><Item>"
+                "<modelName>recovered_car_part_1</modelName>"
+                "</Item></variationData></CVehicleModelInfoVariation>",
+                encoding="utf-8",
+            )
             damaged_stream = resource / "stream" / "damaged"
             damaged_stream.mkdir()
             (damaged_stream / "recovered_car.yft").write_bytes(b"")
@@ -296,15 +330,22 @@ class LargeBatchProgressTests(unittest.TestCase):
             parts_stream.mkdir(parents=True)
             parts_metadata = parts_only / "data" / "kit"
             parts_metadata.mkdir(parents=True)
-            (parts_metadata / "carcols.meta").write_text(
-                "<CVehicleModelInfo__InitDataList><Kits><Item><visibleMods>"
-                "<Item><modelName>orphan_car_grill_4a</modelName></Item>"
-                "<Item><modelName>orphan_car_roof_1</modelName>"
-                "<linkedModels><Item>orphan_car_tips</Item></linkedModels></Item>"
-                "</visibleMods></Item></Kits></CVehicleModelInfo__InitDataList>",
+            (parts_metadata / "carvariations.meta").write_text(
+                "<CVehicleModelInfoVariation><variationData>"
+                "<Item><modelName>miniram2500lema_grill_4a</modelName></Item>"
+                "<Item><modelName>miniram2500lema_roof_1</modelName></Item>"
+                "<Item><modelName>miniram2500lema_skirts</modelName></Item>"
+                "<Item><modelName>miniram2500lema_tips</modelName></Item>"
+                "</variationData></CVehicleModelInfoVariation>",
                 encoding="utf-8",
             )
-            for name in ("orphan_car", "orphan_car_grill_4a", "orphan_car_roof_1", "orphan_car_tips"):
+            for name in (
+                "miniram2500lema",
+                "miniram2500lema_grill_4a",
+                "miniram2500lema_roof_1",
+                "miniram2500lema_skirts",
+                "miniram2500lema_tips",
+            ):
                 (parts_stream / f"{name}.yft").write_bytes(b"")
 
             assets = scan_render_assets(Path(temp_dir), None, {"vehicle"})
@@ -314,7 +355,7 @@ class LargeBatchProgressTests(unittest.TestCase):
                 {
                     ("base_car", "vehicle"),
                     ("flat_car", "vehicle"),
-                    ("orphan_car", "vehicle"),
+                    ("miniram2500lema", "vehicle"),
                     ("recovered_car", "vehicle"),
                 },
             )

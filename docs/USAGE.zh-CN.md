@@ -261,7 +261,7 @@ D:\fivem\ck_free_toolbox\start_toolbox.cmd
 
 元数据支持放在资源根目录或 `data/子包/`，并自动匹配 `stream/子包/`。第三方资源若包含非法 `--` 注释、重复 `<?xml ...?>` 声明或多个拼接文档，渲染器会在内存中修复后重试并输出 `[metadata]` 提示；仍无法完整解析时从 `modelName` 恢复基车，无法恢复的改装配置会退化为只渲染基车。原始文件保持不变。
 
-缺少基车元数据时仍会读取 `carcols.meta`，把 `visibleMods/linkMods/linkedModels` 中的 `.yft` 作为改装件排除，避免格栅、车顶、侧裙和排气尾嘴单独生成截图。
+基础车型使用 `vehicles.meta` 的 `modelName` 与 `handling.meta` 的 `handlingName` 交集判定；`carvariations.meta` 中不属于该交集的 `modelName` 作为组件排除，避免格栅、车顶、侧裙和排气尾嘴单独生成截图。
 
 1. 从元数据确认基车，避免把轮拱、Logo、内饰和改装件当成独立载具截图。
 2. 从 `carvariations.meta` 找到对应 kit。
