@@ -232,7 +232,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1 -O
 
 ## 载具自动拼装
 
-当资源目录包含 `vehicles.meta`、`carvariations.meta` 和 `carcols.meta` 时，渲染器会识别基车模型，读取改装套件，把分离的 `.yft` 部件导入同一场景并按骨骼挂接。改装件不会再被当成独立载具重复截图。
+当资源目录包含 `vehicles.meta`、`carvariations.meta` 和 `carcols.meta` 时，渲染器会识别基车模型，读取改装套件，把分离的 `.yft` 部件导入同一场景并按骨骼挂接。改装件不会再被当成独立载具重复截图。元数据既可位于资源根目录，也可位于 `data/子包/` 并与 `stream/子包/` 对应；第三方包若在 XML 注释中误用 `--`，工具只在内存中移除注释后重试，不修改源文件。
 
 默认 `--vehicle-assembly auto`：检测到可用改装套件时使用 `showcase`，每种 `VMT_*` 类型只选择第一个可用方案，关联件会一起显示。渲染器同时应用所选方案的 `turnOffBones`，关闭同一部位被替换的基车零件；其他可显示 extras 保留。带贴图、特效或发光的零件和图案全部保留；特效壳和投影平面按透明 PNG 图层显示，使用原 Alpha 或贴图亮度去除黑底，整车覆盖层最大不透明度为 0.15。原生发光保留并限制最高强度为 2.4，避免覆盖车漆纹理。与主 `bodyshell` 尺寸和中心都重叠的实体 `extra_N` 按“同部位只显示一套”去重；`requiredExtras` 和改件正在使用的 extra 不隐藏。普通单体模型仍按原流程渲染。
 

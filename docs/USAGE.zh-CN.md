@@ -259,6 +259,8 @@ D:\fivem\ck_free_toolbox\start_toolbox.cmd
 
 载具资源同时包含 `vehicles.meta`、`carvariations.meta`、`carcols.meta` 和多个分离 `.yft` 时，默认 `--vehicle-assembly auto` 会：
 
+元数据支持放在资源根目录或 `data/子包/`，并自动匹配 `stream/子包/`。如果第三方资源的 XML 注释含有标准禁止的 `--`，渲染器会在内存中移除注释后重试并输出 `[metadata]` 提示，原始文件保持不变。
+
 1. 从元数据确认基车，避免把轮拱、Logo、内饰和改装件当成独立载具截图。
 2. 从 `carvariations.meta` 找到对应 kit。
 3. 从 `carcols.meta` 读取 `visibleMods`、`linkedModels`、`type`、`bone` 和 `turnOffBones`。

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from vehicle_assembly import build_assembly_plan, parse_vehicle_models, vehicle_resource_root
+from vehicle_assembly import build_assembly_plan, parse_vehicle_models, vehicle_resource_root, vehicle_resource_roots
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -285,8 +285,11 @@ def choose_vehicle_yfts(all_yfts: list[Path], selected_models: set[str] | None) 
             continue
         source_dir = yft.parent.resolve()
         if source_dir not in resource_models:
-            resource_root = vehicle_resource_root(source_dir)
-            metadata_models = parse_vehicle_models(resource_root, source_dir) if resource_root else []
+            metadata_models = [
+                model
+                for resource_root in vehicle_resource_roots(source_dir)
+                for model in parse_vehicle_models(resource_root, source_dir)
+            ]
             resource_models[source_dir] = {name.lower() for name in metadata_models} if metadata_models else None
         metadata_models = resource_models[source_dir]
         if metadata_models is not None and model.lower() not in metadata_models:
@@ -888,7 +891,7 @@ def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir:
         model.lower() in animation_stems or f"clip@{model.lower()}" in animation_stems
     )
     ytd_names = tuple(matching_ytds(source_dir, model, args.ytd_mode))
-    resource_root = vehicle_resource_root(source_dir) if asset_kind == "vehicle" else None
+    resource_root = vehicle_resource_root(source_dir, model) if asset_kind == "vehicle" else None
     assembly_plan: dict[str, object] = {"enabled": False, "mode": "none", "parts": []}
     if resource_root is not None:
         base_models = {name.lower() for name in parse_vehicle_models(resource_root, source_dir)}

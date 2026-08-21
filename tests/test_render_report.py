@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+from vehicle_assembly import vehicle_resource_root
 
 from render_all_vehicles import (
     RenderJobResult,
@@ -252,20 +253,35 @@ class LargeBatchProgressTests(unittest.TestCase):
     def test_vehicle_metadata_keeps_base_vehicle_and_hides_parts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             resource = Path(temp_dir) / "unified_pack"
-            stream = resource / "stream"
+            stream = resource / "stream" / "subpack"
             stream.mkdir(parents=True)
-            (resource / "vehicles.meta").write_text(
-                "<CVehicleModelInfo__InitDataList><InitDatas><Item>"
+            metadata = resource / "data" / "subpack"
+            metadata.mkdir(parents=True)
+            (metadata / "vehicles.meta").write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                "<CVehicleModelInfo__InitDataList><!-- pack--vip --><InitDatas><Item>"
                 "<modelName>base_car</modelName>"
+                "</Item></InitDatas></CVehicleModelInfo__InitDataList>",
+                encoding="utf-8",
+            )
+            flat_metadata = resource / "data" / "flat"
+            flat_metadata.mkdir(parents=True)
+            (flat_metadata / "vehicles.meta").write_text(
+                "<CVehicleModelInfo__InitDataList><InitDatas><Item>"
+                "<modelName>flat_car</modelName>"
                 "</Item></InitDatas></CVehicleModelInfo__InitDataList>",
                 encoding="utf-8",
             )
             (stream / "base_car.yft").write_bytes(b"")
             (stream / "base_car_dryclutch_1.yft").write_bytes(b"")
+            (resource / "stream" / "flat_car.yft").write_bytes(b"")
+            (resource / "stream" / "flat_car_spoiler_1.yft").write_bytes(b"")
 
             assets = scan_render_assets(Path(temp_dir), None, {"vehicle"})
 
-            self.assertEqual([(path.stem, kind) for path, kind in assets], [("base_car", "vehicle")])
+            self.assertEqual({(path.stem, kind) for path, kind in assets}, {("base_car", "vehicle"), ("flat_car", "vehicle")})
+            self.assertEqual(vehicle_resource_root(stream, "base_car"), metadata.resolve())
+            self.assertEqual(vehicle_resource_root(resource / "stream", "flat_car"), flat_metadata.resolve())
 
     def test_walk_input_files_prunes_generated_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

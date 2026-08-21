@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from pathlib import Path
 
 
 VEHICLE_META_FILES = ("vehicles.meta", "carvariations.meta", "carcols.meta")
+XML_COMMENT_PATTERN = re.compile(r"<!--[\s\S]*?-->")
 
 
 def clean_model_name(name: str) -> str:
@@ -14,24 +17,78 @@ def clean_model_name(name: str) -> str:
     return name
 
 
-def vehicle_resource_root(stream_dir: Path) -> Path | None:
+@lru_cache(maxsize=None)
+def vehicle_resource_roots(stream_dir: Path) -> tuple[Path, ...]:
     stream_dir = stream_dir.resolve()
-    candidates = [stream_dir]
+    candidates: list[Path] = []
+
+    def add_candidate(candidate: Path) -> None:
+        candidate = candidate.resolve()
+        if candidate not in candidates and any((candidate / name).is_file() for name in VEHICLE_META_FILES):
+            candidates.append(candidate)
+
+    add_candidate(stream_dir)
     if stream_dir.name.lower() == "stream":
-        candidates.insert(0, stream_dir.parent)
-    for candidate in candidates:
-        if any((candidate / name).is_file() for name in VEHICLE_META_FILES):
-            return candidate
-    return None
+        add_candidate(stream_dir.parent)
+
+    stream_root = next(
+        (candidate for candidate in (stream_dir, *stream_dir.parents) if candidate.name.lower() == "stream"),
+        None,
+    )
+    if stream_root is not None:
+        resource_root = stream_root.parent
+        relative_stream = stream_dir.relative_to(stream_root)
+        data_root = resource_root / "data"
+        exact_metadata = data_root if str(relative_stream) == "." else data_root / relative_stream
+        add_candidate(exact_metadata)
+        if data_root.is_dir():
+            metadata_directories = sorted(
+                {
+                    path.parent.resolve()
+                    for path in data_root.rglob("*")
+                    if path.is_file() and path.name.lower() in VEHICLE_META_FILES
+                },
+                key=lambda path: str(path).lower(),
+            )
+            for metadata_directory in metadata_directories:
+                add_candidate(metadata_directory)
+    return tuple(candidates)
 
 
+def vehicle_resource_root(stream_dir: Path, model: str = "") -> Path | None:
+    roots = vehicle_resource_roots(stream_dir)
+    if model:
+        model_key = model.lower()
+        for root in roots:
+            if model_key in {name.lower() for name in parse_vehicle_models(root, stream_dir)}:
+                return root
+    for root in roots:
+        if parse_vehicle_models(root, stream_dir):
+            return root
+    return roots[0] if roots else None
+
+
+@lru_cache(maxsize=None)
 def read_xml(path: Path) -> ET.Element | None:
     if not path.is_file():
         return None
     try:
         return ET.parse(path).getroot()
     except ET.ParseError as exc:
-        raise RuntimeError(f"Invalid XML: {path}: {exc}") from exc
+        data = path.read_bytes()
+        if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            text = data.decode("utf-16", errors="replace")
+        else:
+            text = data.decode("utf-8-sig", errors="replace")
+        sanitized = XML_COMMENT_PATTERN.sub("", text)
+        try:
+            root = ET.fromstring(sanitized)
+        except ET.ParseError as sanitized_exc:
+            raise RuntimeError(
+                f"Invalid XML: {path}: {exc}; still invalid after removing comments: {sanitized_exc}"
+            ) from sanitized_exc
+        print(f"[metadata] ignored invalid XML comments: {path}", flush=True)
+        return root
 
 
 def text_of(node: ET.Element | None, name: str) -> str:
@@ -73,7 +130,8 @@ def normalize_extra_name(value: str) -> str:
     return value
 
 
-def stream_yft_map(stream_dir: Path) -> dict[str, str]:
+@lru_cache(maxsize=None)
+def _stream_yft_items(stream_dir: Path) -> tuple[tuple[str, str], ...]:
     by_model: dict[str, str] = {}
     for path in sorted(stream_dir.glob("*.yft")):
         model = clean_model_name(path.stem).lower()
@@ -85,10 +143,15 @@ def stream_yft_map(stream_dir: Path) -> dict[str, str]:
         current_hi = path.stem.lower().endswith(("_hi", "+hi"))
         if existing_hi and not current_hi:
             by_model[model] = path.name
-    return by_model
+    return tuple(by_model.items())
 
 
-def parse_vehicle_models(resource_root: Path, stream_dir: Path) -> list[str]:
+def stream_yft_map(stream_dir: Path) -> dict[str, str]:
+    return dict(_stream_yft_items(stream_dir.resolve()))
+
+
+@lru_cache(maxsize=None)
+def _parse_vehicle_models(resource_root: Path, stream_dir: Path) -> tuple[str, ...]:
     available = stream_yft_map(stream_dir)
     models: list[str] = []
     for meta_name, query in (
@@ -110,7 +173,11 @@ def parse_vehicle_models(resource_root: Path, stream_dir: Path) -> list[str]:
         if key in available and key not in seen:
             seen.add(key)
             out.append(model)
-    return out
+    return tuple(out)
+
+
+def parse_vehicle_models(resource_root: Path, stream_dir: Path) -> list[str]:
+    return list(_parse_vehicle_models(resource_root.resolve(), stream_dir.resolve()))
 
 
 def parse_kits(resource_root: Path) -> dict[str, dict[str, object]]:
