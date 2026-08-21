@@ -20,9 +20,11 @@ from datetime import datetime
 from pathlib import Path
 
 from vehicle_assembly import (
+    VEHICLE_META_FILES,
     build_assembly_plan,
+    parse_declared_vehicle_models,
+    parse_handling_names,
     parse_vehicle_models,
-    parse_vehicle_part_models,
     vehicle_resource_root,
     vehicle_resource_roots,
 )
@@ -282,32 +284,31 @@ def load_model_selection(model_args: list[str], model_file: str = "") -> list[st
     return selected
 
 
-def choose_vehicle_yfts(all_yfts: list[Path], selected_models: set[str] | None) -> list[Path]:
+def choose_vehicle_yfts(
+    all_yfts: list[Path], selected_models: set[str] | None, metadata_roots: set[Path] | None = None
+) -> list[Path]:
     by_model: dict[str, dict[str, Path]] = {}
-    resource_models: dict[Path, set[str] | None] = {}
-    resource_parts: dict[Path, set[str]] = {}
+    source_dirs = {yft.parent.resolve() for yft in all_yfts}
+    all_metadata_roots = {root.resolve() for root in (metadata_roots or set())}
+    for source_dir in source_dirs:
+        all_metadata_roots.update(vehicle_resource_roots(source_dir))
+    handling_names = {
+        name.lower()
+        for resource_root in all_metadata_roots
+        for name in parse_handling_names(resource_root)
+    }
+    confirmed_models = {
+        model.lower()
+        for source_dir in source_dirs
+        for resource_root in all_metadata_roots
+        for model in parse_declared_vehicle_models(resource_root, source_dir)
+        if model.lower() in handling_names
+    }
     for yft in all_yfts:
         model = clean_model_name(yft)
         if selected_models and model.lower() not in selected_models:
             continue
-        source_dir = yft.parent.resolve()
-        if source_dir not in resource_models:
-            resource_roots = vehicle_resource_roots(source_dir)
-            metadata_models = [
-                model
-                for resource_root in resource_roots
-                for model in parse_vehicle_models(resource_root, source_dir)
-            ]
-            resource_models[source_dir] = {name.lower() for name in metadata_models} if metadata_models else None
-            resource_parts[source_dir] = {
-                model.lower()
-                for resource_root in resource_roots
-                for model in parse_vehicle_part_models(resource_root, source_dir)
-            }
-        metadata_models = resource_models[source_dir]
-        if model.lower() in resource_parts[source_dir]:
-            continue
-        if metadata_models is not None and model.lower() not in metadata_models:
+        if model.lower() not in confirmed_models:
             continue
         slot = by_model.setdefault(model.lower(), {})
         if yft.stem.lower().endswith("_hi"):
@@ -396,7 +397,12 @@ def parse_asset_types(spec: str) -> set[str]:
     return selected or all_types
 
 
-def scan_render_assets(root: Path, selected_models: set[str] | None, asset_types: set[str]) -> list[tuple[Path, str]]:
+def scan_render_assets(
+    root: Path,
+    selected_models: set[str] | None,
+    asset_types: set[str],
+    discovered_vehicle_metadata_roots: set[Path] | None = None,
+) -> list[tuple[Path, str]]:
     extension_by_type = {
         "vehicle": ".yft",
         "drawable": ".ydr",
@@ -407,10 +413,13 @@ def scan_render_assets(root: Path, selected_models: set[str] | None, asset_types
     candidates: dict[str, list[Path]] = {extension: [] for extension in requested_extensions}
     scanned = 0
     candidate_count = 0
+    vehicle_metadata_roots: set[Path] = set()
     print(f"[scan] phase=assets status=start root={root}", flush=True)
     for path in walk_input_files(root):
         scanned += 1
         extension = path.suffix.lower()
+        if path.name.lower() in VEHICLE_META_FILES:
+            vehicle_metadata_roots.add(path.parent.resolve())
         if extension in candidates:
             candidates[extension].append(path)
             candidate_count += 1
@@ -421,8 +430,15 @@ def scan_render_assets(root: Path, selected_models: set[str] | None, asset_types
             )
 
     assets: list[tuple[Path, str]] = []
+    if discovered_vehicle_metadata_roots is not None:
+        discovered_vehicle_metadata_roots.update(vehicle_metadata_roots)
     if "vehicle" in asset_types:
-        assets.extend((path, "vehicle") for path in choose_vehicle_yfts(candidates.get(".yft", []), selected_models))
+        assets.extend(
+            (path, "vehicle")
+            for path in choose_vehicle_yfts(
+                candidates.get(".yft", []), selected_models, vehicle_metadata_roots
+            )
+        )
     if "drawable" in asset_types:
         assets.extend(
             (path, "drawable")
@@ -906,24 +922,30 @@ def write_job_file(args, asset: Path, asset_kind: str, jobs_dir: Path, logs_dir:
         model.lower() in animation_stems or f"clip@{model.lower()}" in animation_stems
     )
     ytd_names = tuple(matching_ytds(source_dir, model, args.ytd_mode))
-    resource_root = vehicle_resource_root(source_dir, model) if asset_kind == "vehicle" else None
+    resource_root = (
+        vehicle_resource_root(
+            source_dir,
+            model,
+            tuple(getattr(args, "vehicle_metadata_roots", ()) or ()),
+        )
+        if asset_kind == "vehicle"
+        else None
+    )
     assembly_plan: dict[str, object] = {"enabled": False, "mode": "none", "parts": []}
     if resource_root is not None:
-        base_models = {name.lower() for name in parse_vehicle_models(resource_root, source_dir)}
-        if model.lower() in base_models:
-            assembly_plan = build_assembly_plan(
-                resource_root,
-                source_dir,
-                model,
-                mode=args.vehicle_assembly,
-                requested_kit=args.vehicle_kit,
-                mod_specs=args.vehicle_mod,
+        assembly_plan = build_assembly_plan(
+            resource_root,
+            source_dir,
+            model,
+            mode=args.vehicle_assembly,
+            requested_kit=args.vehicle_kit,
+            mod_specs=args.vehicle_mod,
+        )
+        if assembly_plan.get("enabled"):
+            print(
+                f"[assembly] {model}: mode={assembly_plan['mode']} "
+                f"parts={len(assembly_plan['parts'])} kit={assembly_plan.get('kit') or '-'}"
             )
-            if assembly_plan.get("enabled"):
-                print(
-                    f"[assembly] {model}: mode={assembly_plan['mode']} "
-                    f"parts={len(assembly_plan['parts'])} kit={assembly_plan.get('kit') or '-'}"
-                )
     exposure = args.exposure
     world_strength = args.world_strength
     light_scale = args.light_scale
@@ -2202,8 +2224,16 @@ def main(argv: list[str]) -> int:
     selected_models = {m.lower() for m in args.model} if args.model else None
     asset_types = parse_asset_types(args.asset_types)
     assets: list[tuple[Path, str]] = []
+    args.vehicle_metadata_roots = set()
     for root in scan_roots:
-        assets.extend(scan_render_assets(root, selected_models, asset_types))
+        assets.extend(
+            scan_render_assets(
+                root,
+                selected_models,
+                asset_types,
+                args.vehicle_metadata_roots,
+            )
+        )
 
     # Deduplicate by type, model name and source file path.
     seen: set[tuple[str, str, str]] = set()

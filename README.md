@@ -234,7 +234,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_release.ps1 -O
 
 当资源目录包含 `vehicles.meta`、`carvariations.meta` 和 `carcols.meta` 时，渲染器会识别基车模型，读取改装套件，把分离的 `.yft` 部件导入同一场景并按骨骼挂接。改装件不会再被当成独立载具重复截图。元数据既可位于资源根目录，也可位于 `data/子包/` 并与 `stream/子包/` 对应；第三方包若包含非法 `--` 注释、重复 XML 声明或拼接文档，工具只在内存中修复后重试。仍无法完整解析时从 `modelName` 恢复基车并退化为只渲染基车，不修改源文件。
 
-基础车型按 `vehicles.meta/modelName` 与 `handling.meta/handlingName` 的交集确认；`carvariations.meta/modelName` 中不属于该交集的条目作为车辆组件排除。这样 `grill`、`roof`、`skirts`、`tips` 等部件不会被单独截图，同时仍保留真正的基车。
+基础车型严格按本次输入范围内 `vehicles.meta/modelName` 与 `handling.meta/handlingName` 的全局交集确认。只有交集中的同名 `.yft` 会进入渲染任务，其他 YFT（包括 `carvariations.meta` 中的组件和未登记文件）全部忽略；不会再单独截图 `grill`、`roof`、`skirts`、`tips` 或 `livery`。
+
+这里的“忽略”只表示不为组件创建独立任务；渲染已确认基车时，仍会读取 `carvariations.meta` 与 `carcols.meta`，把该车的组件自动拼入同一场景后输出整车截图。
 
 默认 `--vehicle-assembly auto`：检测到可用改装套件时使用 `showcase`，每种 `VMT_*` 类型只选择第一个可用方案，关联件会一起显示。渲染器同时应用所选方案的 `turnOffBones`，关闭同一部位被替换的基车零件；其他可显示 extras 保留。带贴图、特效或发光的零件和图案全部保留；特效壳和投影平面按透明 PNG 图层显示，使用原 Alpha 或贴图亮度去除黑底，整车覆盖层最大不透明度为 0.15。原生发光保留并限制最高强度为 2.4，避免覆盖车漆纹理。与主 `bodyshell` 尺寸和中心都重叠的实体 `extra_N` 按“同部位只显示一套”去重；`requiredExtras` 和改件正在使用的 extra 不隐藏。普通单体模型仍按原流程渲染。
 

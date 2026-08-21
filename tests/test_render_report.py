@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
-from vehicle_assembly import vehicle_resource_root
+from vehicle_assembly import build_assembly_plan, vehicle_resource_root
 
 from render_all_vehicles import (
     RenderJobResult,
@@ -280,6 +280,14 @@ class LargeBatchProgressTests(unittest.TestCase):
                 "</Item></variationData></CVehicleModelInfoVariation>",
                 encoding="utf-8",
             )
+            (metadata / "carcols.meta").write_text(
+                "<CVehicleModelInfo__InitDataList><Kits><Item>"
+                "<kitName>base_car_modkit</kitName><visibleMods>"
+                "<Item><modelName>base_car_dryclutch_1</modelName>"
+                "<type>VMT_ENGINEBAY1</type><bone>chassis</bone></Item>"
+                "</visibleMods></Item></Kits></CVehicleModelInfo__InitDataList>",
+                encoding="utf-8",
+            )
             flat_metadata = resource / "data" / "flat"
             flat_metadata.mkdir(parents=True)
             (flat_metadata / "vehicles.meta").write_text(
@@ -348,6 +356,27 @@ class LargeBatchProgressTests(unittest.TestCase):
             ):
                 (parts_stream / f"{name}.yft").write_bytes(b"")
 
+            global_metadata = Path(temp_dir) / "metadata_registry" / "data" / "global"
+            global_metadata.mkdir(parents=True)
+            (global_metadata / "vehicles.meta").write_text(
+                "<CVehicleModelInfo__InitDataList><InitDatas>"
+                "<Item><modelName>miniram2500lema</modelName></Item>"
+                "<Item><modelName>fmgt18</modelName></Item>"
+                "</InitDatas></CVehicleModelInfo__InitDataList>",
+                encoding="utf-8",
+            )
+            (global_metadata / "handling.meta").write_text(
+                "<CHandlingDataMgr><HandlingData>"
+                "<Item><handlingName>MINIRAM2500LEMA</handlingName></Item>"
+                "<Item><handlingName>FMGT18</handlingName></Item>"
+                "</HandlingData></CHandlingDataMgr>",
+                encoding="utf-8",
+            )
+            unified_stream = Path(temp_dir) / "804_Unified_Vehicle_Pack" / "stream"
+            unified_stream.mkdir(parents=True)
+            for name in ("fmgt18", "fmgt18_livery6", "fmgt18_livery7", "fmgt18_livery8", "fmgt18_livery9"):
+                (unified_stream / f"{name}.yft").write_bytes(b"")
+
             assets = scan_render_assets(Path(temp_dir), None, {"vehicle"})
 
             self.assertEqual(
@@ -355,6 +384,7 @@ class LargeBatchProgressTests(unittest.TestCase):
                 {
                     ("base_car", "vehicle"),
                     ("flat_car", "vehicle"),
+                    ("fmgt18", "vehicle"),
                     ("miniram2500lema", "vehicle"),
                     ("recovered_car", "vehicle"),
                 },
@@ -362,6 +392,11 @@ class LargeBatchProgressTests(unittest.TestCase):
             self.assertEqual(vehicle_resource_root(stream, "base_car"), metadata.resolve())
             self.assertEqual(vehicle_resource_root(resource / "stream", "flat_car"), flat_metadata.resolve())
             self.assertEqual(vehicle_resource_root(damaged_stream, "recovered_car"), damaged_metadata.resolve())
+            assembly = build_assembly_plan(metadata, stream, "base_car", mode="showcase")
+            self.assertEqual(
+                [part["model"] for part in assembly["parts"]],
+                ["base_car", "base_car_dryclutch_1"],
+            )
 
     def test_walk_input_files_prunes_generated_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -384,10 +419,10 @@ class LargeBatchProgressTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 assets = scan_render_assets(Path("C:/pack"), None, {"vehicle"})
 
-        self.assertEqual(len(assets), 10_000)
+        self.assertEqual(len(assets), 0)
         self.assertIn("phase=assets scanned=1000 candidates=1000", output.getvalue())
         self.assertIn(
-            "phase=assets status=done scanned=10000 candidates=10000 selected=10000",
+            "phase=assets status=done scanned=10000 candidates=10000 selected=0",
             output.getvalue(),
         )
 

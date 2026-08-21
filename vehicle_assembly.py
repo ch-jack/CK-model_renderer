@@ -59,12 +59,21 @@ def vehicle_resource_roots(stream_dir: Path) -> tuple[Path, ...]:
     return tuple(candidates)
 
 
-def vehicle_resource_root(stream_dir: Path, model: str = "") -> Path | None:
-    roots = vehicle_resource_roots(stream_dir)
+def vehicle_resource_root(
+    stream_dir: Path, model: str = "", extra_roots: tuple[Path, ...] = ()
+) -> Path | None:
+    roots = list(vehicle_resource_roots(stream_dir))
+    for root in extra_roots:
+        resolved = root.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
     if model:
         model_key = model.lower()
         for root in roots:
             if model_key in {name.lower() for name in parse_vehicle_models(root, stream_dir)}:
+                return root
+        for root in roots:
+            if model_key in {name.lower() for name in parse_declared_vehicle_models(root, stream_dir)}:
                 return root
     for root in roots:
         if parse_vehicle_models(root, stream_dir):
@@ -185,33 +194,52 @@ def stream_yft_map(stream_dir: Path) -> dict[str, str]:
 
 
 @lru_cache(maxsize=None)
-def _parse_vehicle_models(resource_root: Path, stream_dir: Path) -> tuple[str, ...]:
+def _parse_declared_vehicle_models(resource_root: Path, stream_dir: Path) -> tuple[str, ...]:
     available = stream_yft_map(stream_dir)
     vehicles_root = read_xml(resource_root / "vehicles.meta")
     if vehicles_root is None:
         return ()
-    vehicle_models = [
+    vehicle_models = tuple(
         (node.text or "").strip()
         for node in vehicles_root.findall(".//InitDatas/Item/modelName")
-        if (node.text or "").strip()
-    ]
+        if (node.text or "").strip() and (node.text or "").strip().lower() in available
+    )
+    return vehicle_models
+
+
+def parse_declared_vehicle_models(resource_root: Path, stream_dir: Path) -> list[str]:
+    return list(_parse_declared_vehicle_models(resource_root.resolve(), stream_dir.resolve()))
+
+
+@lru_cache(maxsize=None)
+def _parse_handling_names(resource_root: Path) -> tuple[str, ...]:
     handling_root = read_xml(resource_root / "handling.meta")
-    handling_names = (
-        {
+    if handling_root is None:
+        return ()
+    return tuple(
+        dict.fromkeys(
             (node.text or "").strip().lower()
             for node in handling_root.findall(".//HandlingData/Item/handlingName")
             if (node.text or "").strip()
-        }
-        if handling_root is not None
-        else set()
+        )
     )
-    models = [model for model in vehicle_models if not handling_names or model.lower() in handling_names]
+
+
+def parse_handling_names(resource_root: Path) -> list[str]:
+    return list(_parse_handling_names(resource_root.resolve()))
+
+
+@lru_cache(maxsize=None)
+def _parse_vehicle_models(resource_root: Path, stream_dir: Path) -> tuple[str, ...]:
+    vehicle_models = parse_declared_vehicle_models(resource_root, stream_dir)
+    handling_names = set(parse_handling_names(resource_root))
+    models = [model for model in vehicle_models if model.lower() in handling_names]
 
     out: list[str] = []
     seen: set[str] = set()
     for model in models:
         key = model.lower()
-        if key in available and key not in seen:
+        if key not in seen:
             seen.add(key)
             out.append(model)
     return tuple(out)
@@ -219,32 +247,6 @@ def _parse_vehicle_models(resource_root: Path, stream_dir: Path) -> tuple[str, .
 
 def parse_vehicle_models(resource_root: Path, stream_dir: Path) -> list[str]:
     return list(_parse_vehicle_models(resource_root.resolve(), stream_dir.resolve()))
-
-
-@lru_cache(maxsize=None)
-def _parse_vehicle_part_models(resource_root: Path, stream_dir: Path) -> tuple[str, ...]:
-    available = stream_yft_map(stream_dir)
-    root = read_xml(resource_root / "carvariations.meta")
-    if root is None:
-        return ()
-    candidates = {
-        (node.text or "").strip()
-        for node in root.findall(".//variationData/Item/modelName")
-        if (node.text or "").strip()
-    }
-    base_models = {model.lower() for model in parse_vehicle_models(resource_root, stream_dir)}
-    parts: list[str] = []
-    seen: set[str] = set()
-    for model in candidates:
-        key = model.lower()
-        if model and key in available and key not in base_models and key not in seen:
-            seen.add(key)
-            parts.append(model)
-    return tuple(parts)
-
-
-def parse_vehicle_part_models(resource_root: Path, stream_dir: Path) -> list[str]:
-    return list(_parse_vehicle_part_models(resource_root.resolve(), stream_dir.resolve()))
 
 
 def parse_kits(resource_root: Path) -> dict[str, dict[str, object]]:
