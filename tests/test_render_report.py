@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
-from vehicle_assembly import build_assembly_plan, vehicle_resource_root
+from vehicle_assembly import build_assembly_plan, plan_missing_wheel_clones, vehicle_resource_root
 
 from render_all_vehicles import (
     RenderJobResult,
@@ -250,6 +250,21 @@ class ModelSelectionTests(unittest.TestCase):
 
 
 class LargeBatchProgressTests(unittest.TestCase):
+    def test_missing_wheel_plan_fills_all_four_bone_positions(self) -> None:
+        self.assertEqual(
+            plan_missing_wheel_clones({"lf"}),
+            [
+                ("lf", "rf", True),
+                ("lf", "lr", False),
+                ("rf", "rr", False),
+            ],
+        )
+
+    def test_black_paint_uses_glossy_dark_preset(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "blender_render_vehicle.py").read_text(encoding="utf-8")
+        self.assertIn('"black": ((0.008, 0.008, 0.006, 1.0)', source)
+        self.assertNotIn('MODEL_TONE == "black"', source)
+
     def test_vehicle_metadata_keeps_base_vehicle_and_hides_parts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             resource = Path(temp_dir) / "unified_pack"

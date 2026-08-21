@@ -88,6 +88,8 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --m
 
 大目录扫描每处理 1,000 个文件会输出一条 `[scan]`，任务准备每 500 个输出一条 `[jobs]`；真正进入 Blender 时输出 `[start] 模型名 当前/总数`。调度器只维持 `--workers` 个活动任务，适合一万文件级输入，且不会重新扫描旧 `_vehicle_renders` 和 `_temp` 输出。
 
+只有一个轮胎网格但存在标准 `wheel_lf/rf/lr/rr` 或 hub 锚点的车辆，会自动补齐四轮；跨前后沿骨骼位置平移，只有跨左右时镜像网格。黑色车型保留深黑颜色，同时恢复汽车漆应有的镜面反射和清漆质感。
+
 ## 4. 支持资源类型
 
 ```text

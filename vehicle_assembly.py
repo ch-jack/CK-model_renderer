@@ -12,6 +12,7 @@ XML_DECLARATION_PATTERN = re.compile(r"<\?xml[\s\S]*?\?>", re.IGNORECASE)
 XML_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 MODEL_NAME_PATTERN = re.compile(r"<modelName(?:\s[^>]*)?>([\s\S]*?)</modelName>", re.IGNORECASE)
 HANDLING_NAME_PATTERN = re.compile(r"<handlingName(?:\s[^>]*)?>([\s\S]*?)</handlingName>", re.IGNORECASE)
+STANDARD_WHEEL_KEYS = ("lf", "rf", "lr", "rr")
 
 
 def clean_model_name(name: str) -> str:
@@ -19,6 +20,31 @@ def clean_model_name(name: str) -> str:
     if lower.endswith("_hi") or lower.endswith("+hi"):
         return name[:-3]
     return name
+
+
+def plan_missing_wheel_clones(
+    existing_keys: set[str], target_keys: tuple[str, ...] = STANDARD_WHEEL_KEYS
+) -> list[tuple[str, str, bool]]:
+    available = {key.lower() for key in existing_keys}
+    plans: list[tuple[str, str, bool]] = []
+    for target in target_keys:
+        target = target.lower()
+        if target in available or len(target) != 2:
+            continue
+        side, axle = target
+        other_side = "r" if side == "l" else "l"
+        other_axle = "r" if axle == "f" else "f"
+        candidates = (
+            f"{side}{other_axle}",
+            f"{other_side}{axle}",
+            f"{other_side}{other_axle}",
+        )
+        source = next((candidate for candidate in candidates if candidate in available), None)
+        if source is None:
+            continue
+        plans.append((source, target, source[0] != target[0]))
+        available.add(target)
+    return plans
 
 
 @lru_cache(maxsize=None)

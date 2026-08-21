@@ -11,6 +11,11 @@ from pathlib import Path
 import bpy
 from mathutils import Matrix, Vector
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from vehicle_assembly import plan_missing_wheel_clones
+
 
 TEXTURE_EXTENSIONS = (".png", ".dds", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff")
 NON_COLOR_HINTS = ("bump", "normal", "nrm", "nrml", "spec", "rough", "gloss")
@@ -56,14 +61,14 @@ COLOR_TEXTURE_EXCLUDE_HINTS = (
     "fabric",
     "leather",
 )
-PAINT_COLOR = (0.002, 0.002, 0.0015, 1.0)
+PAINT_COLOR = (0.008, 0.008, 0.006, 1.0)
 CHROME_FALLBACK_COLOR = (0.26, 0.27, 0.26, 1.0)
 MODEL_TONE = "black"
 ASSET_KIND = "vehicle"
 MODEL_TONE_PALETTE = {
     "gray": ((0.12, 0.13, 0.12, 1.0), (0.26, 0.27, 0.26, 1.0)),
     "white": ((0.62, 0.64, 0.61, 1.0), (0.26, 0.27, 0.26, 1.0)),
-    "black": ((0.002, 0.002, 0.0015, 1.0), (0.26, 0.27, 0.26, 1.0)),
+    "black": ((0.008, 0.008, 0.006, 1.0), (0.26, 0.27, 0.26, 1.0)),
 }
 VEHICLE_BODY_PAINT_LAYERS = {1, 2, 3}
 GREEN_SCREEN_COLOR = (0.0, 1.0, 0.0)
@@ -2259,12 +2264,6 @@ def tune_semantic_materials(enable_emission=True):
                     force_input(node, "Specular", 0.42)
                     force_input(node, "Coat Weight", 0.22)
                     force_input(node, "Coat Roughness", 0.20)
-                elif model_toned and MODEL_TONE == "black":
-                    force_input(node, "Roughness", 0.22)
-                    force_input(node, "Specular IOR Level", 0.08)
-                    force_input(node, "Specular", 0.08)
-                    force_input(node, "Coat Weight", 0.04)
-                    force_input(node, "Coat Roughness", 0.18)
                 else:
                     set_input(node, "Roughness", 0.28)
                     set_first_input(node, ("Specular IOR Level", "Specular"), 0.64)
@@ -2503,7 +2502,7 @@ def tune_wheel_materials(texture_index, texture_manifest):
     return changed
 
 
-def duplicate_mesh_at_target(source, target, name, mirror_local_x=False):
+def duplicate_mesh_at_anchor(source, source_anchor, target_anchor, name, mirror_local_x=False):
     bpy.context.view_layer.update()
     clone = source.copy()
     clone.data = source.data.copy()
@@ -2519,41 +2518,54 @@ def duplicate_mesh_at_target(source, target, name, mirror_local_x=False):
     clone.hide_viewport = False
     clone.hide_render = False
     bpy.context.collection.objects.link(clone)
-    clone.matrix_world = target.matrix_world.copy()
+    target_matrix = source.matrix_world.copy()
+    target_matrix.translation = target_matrix.translation + (target_anchor - source_anchor)
+    clone.matrix_world = target_matrix
     return clone
 
 
-def mirror_missing_wheels():
+def standard_wheel_anchor(armature, key):
+    if armature is not None and armature.type == "ARMATURE":
+        for bone_name in (f"wheel_{key}", f"hub_{key}"):
+            bone = armature.data.bones.get(bone_name)
+            if bone is not None:
+                return armature.matrix_world @ bone.head_local
+    hub = bpy.data.objects.get(f"hub_{key}")
+    if hub is not None and hub.type == "MESH":
+        center, _ = world_box_center_and_size(hub)
+        return center
+    return None
+
+
+def complete_missing_wheels():
     created = 0
     objects = bpy.data.objects
-    pairs = []
-    for obj in list(objects):
-        lower = obj.name.lower()
-        if obj.type != "MESH" or not lower.startswith("wheel_l") or ".child" not in lower:
+    wheel_objects = {
+        key: objects.get(f"wheel_{key}.child")
+        for key in ("lf", "rf", "lr", "rr")
+        if objects.get(f"wheel_{key}.child") is not None
+    }
+    armature = next((mesh_armature(obj) for obj in wheel_objects.values() if mesh_armature(obj)), None)
+    anchors = {key: standard_wheel_anchor(armature, key) for key in ("lf", "rf", "lr", "rr")}
+    available_targets = tuple(key for key, anchor in anchors.items() if anchor is not None)
+    plans = plan_missing_wheel_clones(set(wheel_objects), available_targets)
+    for source_key, target_key, mirror_local_x in plans:
+        source = wheel_objects.get(source_key)
+        source_anchor = anchors.get(source_key)
+        target_anchor = anchors.get(target_key)
+        if source is None or source_anchor is None or target_anchor is None:
             continue
-        target_name = "wheel_r" + obj.name[7:]
-        target_col = target_name.replace(".child", ".col")
-        pairs.append((obj.name, target_name, target_col))
-
-    for obj in list(objects):
-        lower = obj.name.lower()
-        if obj.type != "MESH" or not lower.startswith("wheel_r") or ".child" not in lower:
-            continue
-        target_name = "wheel_l" + obj.name[7:]
-        target_col = target_name.replace(".child", ".col")
-        pairs.append((obj.name, target_name, target_col))
-
-    for source_name, target_name, target_col_name in pairs:
-        if objects.get(target_name):
-            continue
-        source = objects.get(source_name)
-        target = objects.get(target_col_name)
-        if not source or not target:
-            continue
-        mirror_local_x = source_name[:7].lower() != target_name[:7].lower()
-        clone = duplicate_mesh_at_target(source, target, target_name, mirror_local_x)
+        target_name = f"wheel_{target_key}.child"
+        clone = duplicate_mesh_at_anchor(
+            source,
+            source_anchor,
+            target_anchor,
+            target_name,
+            mirror_local_x,
+        )
+        wheel_objects[target_key] = clone
         suffix = " mirrored-x" if mirror_local_x else ""
-        print(f"Wheel mirror: {source_name} -> {clone.name}{suffix}")
+        print(f"Wheel clone: {source.name} -> {clone.name}{suffix} anchor=standard")
         created += 1
     return created
 
@@ -3282,8 +3294,8 @@ def main():
     print(f"Accessory normal maps tuned: {accessory_normal_tunes}")
     overlay_tunes = tune_effect_overlay_materials()
     print(f"Effect overlays finalized after shader bake: {overlay_tunes}")
-    wheels_created = mirror_missing_wheels() if job.get("asset_kind", "vehicle") == "vehicle" else 0
-    print(f"Wheel mirror created: {wheels_created}")
+    wheels_created = complete_missing_wheels() if job.get("asset_kind", "vehicle") == "vehicle" else 0
+    print(f"Wheel completion created: {wheels_created}")
 
     objects = mesh_objects()
     if not objects:
