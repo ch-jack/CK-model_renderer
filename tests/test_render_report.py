@@ -13,6 +13,7 @@ from render_all_vehicles import (
     RenderJobResult,
     VehicleJob,
     build_arg_parser,
+    load_model_selection,
     matching_ytds,
     write_model_render_execution_report,
 )
@@ -218,5 +219,27 @@ class YtdMatchingTests(unittest.TestCase):
     def test_parser_defaults_to_match_mode(self) -> None:
         args = build_arg_parser().parse_args(["C:/models"])
         self.assertEqual(args.ytd_mode, "match")
+
+
+class ModelSelectionTests(unittest.TestCase):
+    def test_model_file_combines_deduplicates_and_accepts_utf8_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            selection_file = Path(temp_dir) / "models.txt"
+            selection_file.write_text("Alpha\n beta \nALPHA\n\n模型三\n", encoding="utf-8-sig")
+
+            selected = load_model_selection(["CLI", "Beta"], str(selection_file))
+
+            self.assertEqual(selected, ["CLI", "Beta", "Alpha", "模型三"])
+
+    def test_model_file_missing_returns_clear_error(self) -> None:
+        missing = Path(tempfile.gettempdir()) / f"missing-models-{time.time_ns()}.txt"
+        with self.assertRaisesRegex(ValueError, "Unable to read model selection file"):
+            load_model_selection([], str(missing))
+
+    def test_parser_accepts_model_file(self) -> None:
+        args = build_arg_parser().parse_args(["C:/models", "--model-file", "C:/temp/models.txt"])
+        self.assertEqual(args.model_file, "C:/temp/models.txt")
+
+
 if __name__ == "__main__":
     unittest.main()

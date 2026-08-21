@@ -206,6 +206,31 @@ def selected_model_matches(asset: Path, selected_models: set[str] | None) -> boo
     return bool({asset.stem.lower(), clean_model_name(asset).lower()} & selected_models)
 
 
+def load_model_selection(model_args: list[str], model_file: str = "") -> list[str]:
+    requested = list(model_args or [])
+    if model_file:
+        selection_path = Path(model_file).expanduser()
+        try:
+            requested.extend(selection_path.read_text(encoding="utf-8-sig").splitlines())
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"Unable to read model selection file '{selection_path}': {exc}") from exc
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for raw_name in requested:
+        name = str(raw_name).strip()
+        if not name:
+            continue
+        if "\0" in name:
+            raise ValueError("Model selection contains a null character.")
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(name)
+    return selected
+
+
 def scan_vehicle_yfts(root: Path, selected_models: set[str] | None) -> list[Path]:
     all_yfts = [p for p in root.rglob("*.yft") if p.is_file() and not path_is_generated_output(p)]
     by_model: dict[str, dict[str, Path]] = {}
@@ -1764,6 +1789,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", default="", help="Output folder. Default: <input>/_vehicle_renders")
     parser.add_argument("--workers", type=int, default=default_workers(), help="Parallel Blender process count.")
     parser.add_argument("--model", action="append", default=[], help="Only render this model/asset name. Can be repeated.")
+    parser.add_argument("--model-file", default="", help="UTF-8 text file with one model/asset name per line.")
     parser.add_argument("--asset-types", default="all", help="Comma list: all,vehicle,drawable,drawable-dict,map,weapon,prop,accessory.")
     parser.add_argument(
         "--vehicle-assembly",
@@ -1847,6 +1873,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    try:
+        args.model = load_model_selection(args.model, args.model_file)
+    except ValueError as exc:
+        print(f"[input] {exc}", file=sys.stderr, flush=True)
+        return 2
     run_started_at = datetime.now().astimezone()
     run_started_monotonic = time.monotonic()
     run_id = uuid.uuid4().hex[:10]

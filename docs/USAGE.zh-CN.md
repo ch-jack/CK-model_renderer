@@ -80,6 +80,12 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --model w_ar_kajszs --cutout
 ```
 
+大量指定模型可使用 UTF-8 文本清单，每行填写一个模型名：
+
+```powershell
+python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --model-file "D:\fivem\models.txt" --cutout
+```
+
 ## 4. 支持资源类型
 
 ```text

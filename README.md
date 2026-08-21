@@ -42,7 +42,7 @@
 - 自动解包 `.zip`、`.rar`、`.7z` 和 `.rpf`，支持压缩包里再套 RPF。
 - 解包和纹理提取临时文件统一写入本次输出目录的 `_temp`，不使用系统临时目录；任务结束自动清理，`--keep-work` 时保留为 `_work`。
 - 启动前校验 Blender 4.2+（推荐 5.1）及运行目录可用空间；低于 1 GB 时直接给出明确提示。
-- 一个压缩包内多个模型会全部生成任务；`--model` 只用于手动过滤指定模型。
+- 一个压缩包内多个模型会全部生成任务；`--model` 只用于手动过滤指定模型，大批量筛选可使用 `--model-file` 清单。
 - 自动提取本地 `.ytd` 和共享 `vehshare.ytd`，绑定材质贴图。
 - 正确识别 YDR 内嵌 `color_d/color_n/color_s` 贴图，不再误报缺失或用外部颜色覆盖。
 - 饰品自动使用 Cycles、AgX Punchy 色彩、柔和棚拍光和灰色背景；带同名 YCD 动画的姿态模型自动使用正面特写，普通饰品与透明 PNG 保持完整安全取景。
@@ -86,6 +86,12 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 
 ```powershell
 python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --model w_ar_kajszs --cutout
+```
+
+大量指定模型可写入 UTF-8 文本清单（每行一个模型名），避免 Windows 命令行长度限制：
+
+```powershell
+python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --model-file "D:\fivem\models.txt" --cutout
 ```
 
 ## 资源类型
