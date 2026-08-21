@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import struct
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from render_all_vehicles import (
     RenderJobResult,
     VehicleJob,
     build_arg_parser,
+    execute_render_jobs,
     load_model_selection,
     matching_ytds,
+    scan_render_assets,
+    walk_input_files,
     write_model_render_execution_report,
 )
 
@@ -239,6 +246,82 @@ class ModelSelectionTests(unittest.TestCase):
     def test_parser_accepts_model_file(self) -> None:
         args = build_arg_parser().parse_args(["C:/models", "--model-file", "C:/temp/models.txt"])
         self.assertEqual(args.model_file, "C:/temp/models.txt")
+
+
+class LargeBatchProgressTests(unittest.TestCase):
+    def test_vehicle_metadata_keeps_base_vehicle_and_hides_parts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            resource = Path(temp_dir) / "unified_pack"
+            stream = resource / "stream"
+            stream.mkdir(parents=True)
+            (resource / "vehicles.meta").write_text(
+                "<CVehicleModelInfo__InitDataList><InitDatas><Item>"
+                "<modelName>base_car</modelName>"
+                "</Item></InitDatas></CVehicleModelInfo__InitDataList>",
+                encoding="utf-8",
+            )
+            (stream / "base_car.yft").write_bytes(b"")
+            (stream / "base_car_dryclutch_1.yft").write_bytes(b"")
+
+            assets = scan_render_assets(Path(temp_dir), None, {"vehicle"})
+
+            self.assertEqual([(path.stem, kind) for path, kind in assets], [("base_car", "vehicle")])
+
+    def test_walk_input_files_prunes_generated_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "stream").mkdir()
+            (root / "stream" / "base_car.yft").write_bytes(b"")
+            (root / "_vehicle_renders").mkdir()
+            (root / "_vehicle_renders" / "old_output.yft").write_bytes(b"")
+            (root / "_temp").mkdir()
+            (root / "_temp" / "temporary_part.yft").write_bytes(b"")
+
+            names = [path.name for path in walk_input_files(root)]
+
+            self.assertEqual(names, ["base_car.yft"])
+
+    def test_scan_reports_progress_for_ten_thousand_candidates(self) -> None:
+        fake_paths = [Path("C:/pack/stream") / f"car_{index:05d}.yft" for index in range(10_000)]
+        output = io.StringIO()
+        with mock.patch("render_all_vehicles.walk_input_files", return_value=iter(fake_paths)):
+            with contextlib.redirect_stdout(output):
+                assets = scan_render_assets(Path("C:/pack"), None, {"vehicle"})
+
+        self.assertEqual(len(assets), 10_000)
+        self.assertIn("phase=assets scanned=1000 candidates=1000", output.getvalue())
+        self.assertIn(
+            "phase=assets status=done scanned=10000 candidates=10000 selected=10000",
+            output.getvalue(),
+        )
+
+    def test_render_scheduler_logs_started_models_and_limits_concurrency(self) -> None:
+        jobs = [SimpleNamespace(model=f"car_{index:03d}") for index in range(24)]
+        args = SimpleNamespace(workers=4)
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def fake_runner(blender, job, runner_args):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.01)
+            with lock:
+                active -= 1
+            return RenderJobResult(job, "success", 0, 0.01, "")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            results, failures = execute_render_jobs(Path("C:/Blender/blender.exe"), jobs, args, fake_runner)
+
+        self.assertEqual(len(results), len(jobs))
+        self.assertEqual(failures, [])
+        self.assertGreaterEqual(max_active, 2)
+        self.assertLessEqual(max_active, args.workers)
+        self.assertIn("[start] car_000 1/24", output.getvalue())
+        self.assertIn("24/24", output.getvalue())
 
 
 if __name__ == "__main__":

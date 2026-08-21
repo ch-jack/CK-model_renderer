@@ -86,6 +86,8 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --m
 python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --model-file "D:\fivem\models.txt" --cutout
 ```
 
+大目录扫描每处理 1,000 个文件会输出一条 `[scan]`，任务准备每 500 个输出一条 `[jobs]`；真正进入 Blender 时输出 `[start] 模型名 当前/总数`。调度器只维持 `--workers` 个活动任务，适合一万文件级输入，且不会重新扫描旧 `_vehicle_renders` 和 `_temp` 输出。
+
 ## 4. 支持资源类型
 
 ```text

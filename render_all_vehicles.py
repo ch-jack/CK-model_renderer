@@ -28,6 +28,15 @@ INNER_SCRIPT = SCRIPT_DIR / "blender_render_vehicle.py"
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 MIN_BLENDER_VERSION = (4, 2, 0)
 MIN_FREE_DISK_BYTES = 1024**3
+GENERATED_OUTPUT_NAMES = {
+    "_vehicle_renders",
+    "_assembled_blender",
+    "_temp",
+    "_work",
+    "_archive_unpacked",
+    "_rpf_unpacked",
+}
+SCAN_PROGRESS_INTERVAL = 1000
 
 
 @dataclass(frozen=True)
@@ -196,8 +205,44 @@ def clean_model_name(asset: Path) -> str:
 
 
 def path_is_generated_output(path: Path) -> bool:
-    generated = {"_vehicle_renders", "_assembled_blender", "_temp", "_work", "_archive_unpacked", "_rpf_unpacked"}
-    return any(part.lower() in generated for part in path.parts)
+    return any(part.lower() in GENERATED_OUTPUT_NAMES for part in path.parts)
+
+
+def walk_input_files(root: Path, exclude_generated: bool = True):
+    if root.is_file():
+        yield root
+        return
+    for current, directories, filenames in os.walk(root):
+        if exclude_generated:
+            directories[:] = [name for name in directories if name.lower() not in GENERATED_OUTPUT_NAMES]
+        current_path = Path(current)
+        for filename in filenames:
+            yield current_path / filename
+
+
+def discover_files(
+    roots: list[Path], extensions: set[str], phase: str, exclude_generated: bool = True
+) -> list[Path]:
+    normalized_extensions = {extension.lower() for extension in extensions}
+    discovered: list[Path] = []
+    seen: set[str] = set()
+    scanned = 0
+    print(f"[scan] phase={phase} status=start roots={len(roots)}", flush=True)
+    for root in roots:
+        for path in walk_input_files(root, exclude_generated=exclude_generated):
+            scanned += 1
+            if path.suffix.lower() in normalized_extensions:
+                key = str(path.resolve()).lower()
+                if key not in seen:
+                    seen.add(key)
+                    discovered.append(path)
+            if scanned % SCAN_PROGRESS_INTERVAL == 0:
+                print(f"[scan] phase={phase} scanned={scanned} found={len(discovered)}", flush=True)
+    print(
+        f"[scan] phase={phase} status=done scanned={scanned} found={len(discovered)}",
+        flush=True,
+    )
+    return sorted(discovered)
 
 
 def selected_model_matches(asset: Path, selected_models: set[str] | None) -> bool:
@@ -231,8 +276,7 @@ def load_model_selection(model_args: list[str], model_file: str = "") -> list[st
     return selected
 
 
-def scan_vehicle_yfts(root: Path, selected_models: set[str] | None) -> list[Path]:
-    all_yfts = [p for p in root.rglob("*.yft") if p.is_file() and not path_is_generated_output(p)]
+def choose_vehicle_yfts(all_yfts: list[Path], selected_models: set[str] | None) -> list[Path]:
     by_model: dict[str, dict[str, Path]] = {}
     resource_models: dict[Path, set[str] | None] = {}
     for yft in all_yfts:
@@ -258,8 +302,15 @@ def scan_vehicle_yfts(root: Path, selected_models: set[str] | None) -> list[Path
         result.append(item.get("hi") or item["base"])
     return sorted(result, key=lambda p: (str(p.parent).lower(), clean_model_name(p).lower()))
 
-def scan_hi_preferred_assets(root: Path, extension: str, selected_models: set[str] | None) -> list[Path]:
-    all_assets = [p for p in root.rglob(f"*{extension}") if p.is_file() and not path_is_generated_output(p)]
+
+def scan_vehicle_yfts(root: Path, selected_models: set[str] | None) -> list[Path]:
+    all_yfts = [path for path in walk_input_files(root) if path.suffix.lower() == ".yft"]
+    return choose_vehicle_yfts(all_yfts, selected_models)
+
+
+def choose_hi_preferred_assets(
+    all_assets: list[Path], selected_models: set[str] | None
+) -> list[Path]:
     by_model: dict[str, dict[str, Path]] = {}
     for asset in all_assets:
         if not selected_model_matches(asset, selected_models):
@@ -278,12 +329,21 @@ def scan_hi_preferred_assets(root: Path, extension: str, selected_models: set[st
     return sorted(result, key=lambda p: (str(p.parent).lower(), clean_model_name(p).lower()))
 
 
+def scan_hi_preferred_assets(root: Path, extension: str, selected_models: set[str] | None) -> list[Path]:
+    all_assets = [path for path in walk_input_files(root) if path.suffix.lower() == extension]
+    return choose_hi_preferred_assets(all_assets, selected_models)
+
+
+def choose_plain_assets(all_assets: list[Path], selected_models: set[str] | None) -> list[Path]:
+    return sorted(
+        (asset for asset in all_assets if selected_model_matches(asset, selected_models)),
+        key=lambda p: (str(p.parent).lower(), clean_model_name(p).lower()),
+    )
+
+
 def scan_plain_assets(root: Path, extension: str, selected_models: set[str] | None) -> list[Path]:
-    result = []
-    for asset in root.rglob(f"*{extension}"):
-        if asset.is_file() and not path_is_generated_output(asset) and selected_model_matches(asset, selected_models):
-            result.append(asset)
-    return sorted(result, key=lambda p: (str(p.parent).lower(), clean_model_name(p).lower()))
+    all_assets = [path for path in walk_input_files(root) if path.suffix.lower() == extension]
+    return choose_plain_assets(all_assets, selected_models)
 
 
 def parse_asset_types(spec: str) -> set[str]:
@@ -319,15 +379,48 @@ def parse_asset_types(spec: str) -> set[str]:
 
 
 def scan_render_assets(root: Path, selected_models: set[str] | None, asset_types: set[str]) -> list[tuple[Path, str]]:
+    extension_by_type = {
+        "vehicle": ".yft",
+        "drawable": ".ydr",
+        "drawable-dict": ".ydd",
+        "map": ".ymap",
+    }
+    requested_extensions = {extension_by_type[item] for item in asset_types if item in extension_by_type}
+    candidates: dict[str, list[Path]] = {extension: [] for extension in requested_extensions}
+    scanned = 0
+    candidate_count = 0
+    print(f"[scan] phase=assets status=start root={root}", flush=True)
+    for path in walk_input_files(root):
+        scanned += 1
+        extension = path.suffix.lower()
+        if extension in candidates:
+            candidates[extension].append(path)
+            candidate_count += 1
+        if scanned % SCAN_PROGRESS_INTERVAL == 0:
+            print(
+                f"[scan] phase=assets scanned={scanned} candidates={candidate_count}",
+                flush=True,
+            )
+
     assets: list[tuple[Path, str]] = []
     if "vehicle" in asset_types:
-        assets.extend((path, "vehicle") for path in scan_vehicle_yfts(root, selected_models))
+        assets.extend((path, "vehicle") for path in choose_vehicle_yfts(candidates.get(".yft", []), selected_models))
     if "drawable" in asset_types:
-        assets.extend((path, "drawable") for path in scan_hi_preferred_assets(root, ".ydr", selected_models))
+        assets.extend(
+            (path, "drawable")
+            for path in choose_hi_preferred_assets(candidates.get(".ydr", []), selected_models)
+        )
     if "drawable-dict" in asset_types:
-        assets.extend((path, "drawable-dict") for path in scan_plain_assets(root, ".ydd", selected_models))
+        assets.extend(
+            (path, "drawable-dict")
+            for path in choose_plain_assets(candidates.get(".ydd", []), selected_models)
+        )
     if "map" in asset_types:
-        assets.extend((path, "map") for path in scan_plain_assets(root, ".ymap", selected_models))
+        assets.extend((path, "map") for path in choose_plain_assets(candidates.get(".ymap", []), selected_models))
+    print(
+        f"[scan] phase=assets status=done scanned={scanned} candidates={candidate_count} selected={len(assets)}",
+        flush=True,
+    )
     return assets
 
 
@@ -569,10 +662,7 @@ def unpack_archives(
     input_dir: Path, work_dir: Path, archive_tool: Path | None, operations: list[dict[str, object]] | None = None
 ) -> list[Path]:
     roots: list[Path] = []
-    if input_dir.is_file() and input_dir.suffix.lower() in ARCHIVE_EXTENSIONS:
-        archives = [input_dir]
-    else:
-        archives = [p for p in input_dir.rglob("*") if p.is_file() and p.suffix.lower() in ARCHIVE_EXTENSIONS]
+    archives = discover_files([input_dir], ARCHIVE_EXTENSIONS, "archives")
     if not archives:
         append_operation(
             operations,
@@ -630,7 +720,9 @@ def unpack_archives(
         )
         roots.append(out_dir)
         queue.extend(
-            p for p in out_dir.rglob("*") if p.is_file() and p.suffix.lower() in ARCHIVE_EXTENSIONS
+            path
+            for path in walk_input_files(out_dir, exclude_generated=False)
+            if path.suffix.lower() in ARCHIVE_EXTENSIONS
         )
     return roots
 
@@ -741,15 +833,7 @@ def unpack_rpfs(
     scan_roots: list[Path], work_dir: Path, rpf_tool: Path, operations: list[dict[str, object]] | None = None
 ) -> list[Path]:
     roots = []
-    rpf_files = []
-    seen_rpfs: set[str] = set()
-    for root in scan_roots:
-        for rpf in root.rglob("*.rpf"):
-            key = str(rpf.resolve()).lower()
-            if rpf.is_file() and key not in seen_rpfs:
-                seen_rpfs.add(key)
-                rpf_files.append(rpf)
-    rpf_files = sorted(rpf_files)
+    rpf_files = discover_files(scan_roots, {".rpf"}, "rpf")
     if not rpf_files:
         append_operation(
             operations,
@@ -1028,6 +1112,67 @@ def run_blender_job(blender: Path, job: VehicleJob, args) -> RenderJobResult:
         message = f"{stage}；完整日志: {job.log_path}"
     status = "success" if rc == 0 else "failed"
     return RenderJobResult(job, status, rc, elapsed, message)
+
+
+def execute_render_jobs(blender: Path, jobs: list[VehicleJob], args, job_runner=None):
+    runner = job_runner or run_blender_job
+    workers = max(1, args.workers)
+    total = len(jobs)
+    job_results: list[RenderJobResult] = []
+    failures: list[RenderJobResult] = []
+    completed = 0
+    next_index = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        pending: dict[concurrent.futures.Future, tuple[int, VehicleJob]] = {}
+
+        def submit_next() -> None:
+            nonlocal next_index
+            if next_index >= total:
+                return
+            job_index = next_index + 1
+            job = jobs[next_index]
+            next_index += 1
+            print(f"[start] {job.model} {job_index}/{total}", flush=True)
+            pending[executor.submit(runner, blender, job, args)] = (job_index, job)
+
+        for _ in range(min(workers, total)):
+            submit_next()
+
+        while pending:
+            done, _ = concurrent.futures.wait(
+                tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for future in done:
+                _, job = pending.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    message = f"模型任务异常退出：{exc}"
+                    result = RenderJobResult(job, "failed", 1, 0.0, message)
+                job_results.append(result)
+                completed += 1
+                if result.status == "success":
+                    print(
+                        f"[ok] {result.job.model} {completed}/{total} {result.elapsed_seconds:.1f}s",
+                        flush=True,
+                    )
+                elif result.status == "skipped_existing":
+                    print(
+                        f"[skip] {result.job.model} {completed}/{total} existing output",
+                        flush=True,
+                    )
+                else:
+                    suffix = f" - {result.message}" if result.message else ""
+                    print(
+                        f"[fail] {result.job.model} {completed}/{total} rc={result.return_code} "
+                        f"{result.elapsed_seconds:.1f}s{suffix}",
+                        flush=True,
+                    )
+                    failures.append(result)
+                submit_next()
+
+    return job_results, failures
 
 
 def read_json_object(path: Path) -> dict:
@@ -2004,14 +2149,7 @@ def main(argv: list[str]) -> int:
         if rpf_tool:
             scan_roots.extend(unpack_rpfs(scan_roots, temp_root, rpf_tool, operation_records))
         else:
-            rpf_files = sorted(
-                {
-                    str(path.resolve())
-                    for root in scan_roots
-                    for path in root.rglob("*.rpf")
-                    if path.is_file()
-                }
-            )
+            rpf_files = discover_files(scan_roots, {".rpf"}, "rpf")
             if rpf_files:
                 print("[rpf] RpfTools.exe not found; skip .rpf unpack")
                 append_operation(
@@ -2095,7 +2233,12 @@ def main(argv: list[str]) -> int:
         emit_report("failed", message)
         return 1
 
-    jobs = [write_job_file(args, asset, asset_kind, jobs_dir, logs_dir, out_dir) for asset, asset_kind in unique_assets]
+    jobs = []
+    print(f"[jobs] status=start total={len(unique_assets)}", flush=True)
+    for index, (asset, asset_kind) in enumerate(unique_assets, start=1):
+        jobs.append(write_job_file(args, asset, asset_kind, jobs_dir, logs_dir, out_dir))
+        if index % 500 == 0 or index == len(unique_assets):
+            print(f"[jobs] prepared={index}/{len(unique_assets)}", flush=True)
     append_operation(
         operation_records,
         "input_scan",
@@ -2122,28 +2265,7 @@ def main(argv: list[str]) -> int:
         if args.cutout_width or args.cutout_height:
             print(f"Cutout minimum: {max(args.cutout_width, 0)}x{max(args.cutout_height, 0)} (aspect ratio preserved)")
 
-    failures: list[RenderJobResult] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        future_jobs = {executor.submit(run_blender_job, blender, job, args): job for job in jobs}
-        for future in concurrent.futures.as_completed(future_jobs):
-            job = future_jobs[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                message = f"\u6a21\u578b\u4efb\u52a1\u5f02\u5e38\u9000\u51fa\uff1a{exc}"
-                result = RenderJobResult(job, "failed", 1, 0.0, message)
-            job_results.append(result)
-            if result.status == "success":
-                print(f"[ok] {result.job.model} {result.elapsed_seconds:.1f}s")
-            elif result.status == "skipped_existing":
-                print(f"[skip] {result.job.model} existing output")
-            else:
-                suffix = f" - {result.message}" if result.message else ""
-                print(
-                    f"[fail] {result.job.model} rc={result.return_code} "
-                    f"{result.elapsed_seconds:.1f}s{suffix}"
-                )
-                failures.append(result)
+    job_results, failures = execute_render_jobs(blender, jobs, args)
     append_operation(
         operation_records,
         "blender_render",

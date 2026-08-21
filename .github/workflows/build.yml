@@ -33,6 +33,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Run renderer tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
       - name: Build release package
         shell: pwsh
         env:
