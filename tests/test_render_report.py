@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import concurrent.futures
 import io
 import json
+import os
 import struct
 import tempfile
 import threading
@@ -19,6 +21,8 @@ from render_all_vehicles import (
     VehicleJob,
     build_arg_parser,
     execute_render_jobs,
+    extract_textures_for_job,
+    isolated_tool_environment,
     load_model_selection,
     matching_ytds,
     scan_render_assets,
@@ -250,6 +254,67 @@ class ModelSelectionTests(unittest.TestCase):
 
 
 class LargeBatchProgressTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "YtdTools concurrency regression requires Windows")
+    def test_ytd_tool_concurrent_jobs_keep_staged_inputs(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        ytd_tool = repo_root / "tools" / "YtdTools.exe"
+        source_ytd = repo_root / "vehshare.ytd"
+        if not ytd_tool.is_file() or not source_ytd.is_file():
+            self.skipTest("YtdTools.exe or vehshare.ytd is unavailable")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            textures_root = root / "textures"
+            temp_root = root / "temp"
+            textures_root.mkdir()
+            temp_root.mkdir()
+            args = SimpleNamespace(
+                skip_textures=False,
+                force=True,
+                textures_root=textures_root,
+                temp_root=temp_root,
+                ytd_tool_path=ytd_tool,
+                texconv_path=None,
+                texture_format="dds",
+            )
+            jobs = []
+            for index in range(4):
+                model = f"ytd_race_{index}"
+                jobs.append(
+                    VehicleJob(
+                        model=model,
+                        asset_kind="vehicle",
+                        source_dir=repo_root,
+                        asset_name="unused.yft",
+                        ytd_names=(source_ytd.name,),
+                        shared_ytd_paths=(),
+                        texture_dir=textures_root / model,
+                        texture_log_path=root / f"{model}.textures.log",
+                        texture_bind_report_path=root / f"{model}.textures.bind.json",
+                        output_path=root / f"{model}.png",
+                        final_output_path=root / f"{model}.png",
+                        log_path=root / f"{model}.log",
+                        job_path=root / f"{model}.json",
+                    )
+                )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(extract_textures_for_job, job, args) for job in jobs]
+                for future in futures:
+                    future.result()
+            for job in jobs:
+                self.assertTrue(any(job.texture_dir.glob("*.dds")), job.model)
+                self.assertIn("isolated TEMP=", job.texture_log_path.read_text(encoding="utf-8"))
+
+    def test_ytd_tool_uses_isolated_temp_and_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tool_temp = Path(temp_dir) / "tool_temp"
+            tool_temp.mkdir()
+            env = isolated_tool_environment(tool_temp)
+            expected = str(tool_temp.resolve())
+            self.assertEqual((env["TEMP"], env["TMP"], env["TMPDIR"]), (expected, expected, expected))
+        source = (Path(__file__).resolve().parents[1] / "render_all_vehicles.py").read_text(encoding="utf-8")
+        self.assertIn("with YTD_TOOL_LOCK:", source)
+        self.assertIn('input_dir = tmp_dir / "input"', source)
+
     def test_missing_wheel_plan_fills_all_four_bone_positions(self) -> None:
         self.assertEqual(
             plan_missing_wheel_clones({"lf"}),

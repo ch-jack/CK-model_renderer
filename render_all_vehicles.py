@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ GENERATED_OUTPUT_NAMES = {
     "_rpf_unpacked",
 }
 SCAN_PROGRESS_INTERVAL = 1000
+YTD_TOOL_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -660,7 +662,7 @@ def chunked(items: list[Path], size: int):
         yield items[index : index + size]
 
 
-def run_logged(cmd: list[str], cwd: Path, log) -> subprocess.CompletedProcess:
+def run_logged(cmd: list[str], cwd: Path, log, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     log.write(" ".join(cmd) + "\n")
     result = subprocess.run(
         cmd,
@@ -669,6 +671,7 @@ def run_logged(cmd: list[str], cwd: Path, log) -> subprocess.CompletedProcess:
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
     )
     if result.stdout:
         log.write(result.stdout)
@@ -677,6 +680,14 @@ def run_logged(cmd: list[str], cwd: Path, log) -> subprocess.CompletedProcess:
     log.write(f"\nexit={result.returncode}\n\n")
     log.flush()
     return result
+
+
+def isolated_tool_environment(temp_dir: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    temp_path = str(temp_dir.resolve())
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        env[name] = temp_path
+    return env
 
 
 def safe_folder_name(path: Path) -> str:
@@ -825,10 +836,16 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
 
             with tempfile.TemporaryDirectory(prefix=f"{job.model}_ytd_", dir=args.temp_root) as tmp:
                 tmp_dir = Path(tmp)
-                tmp_ytd = tmp_dir / ytd_path.name
+                input_dir = tmp_dir / "input"
                 dds_dir = tmp_dir / "dds"
+                tool_temp = tmp_dir / "tool_temp"
+                input_dir.mkdir(parents=True, exist_ok=True)
                 dds_dir.mkdir(parents=True, exist_ok=True)
+                tool_temp.mkdir(parents=True, exist_ok=True)
+                tmp_ytd = input_dir / ytd_path.name
                 shutil.copy2(ytd_path, tmp_ytd)
+                if not tmp_ytd.is_file():
+                    raise FileNotFoundError(f"Failed to stage YTD input: {tmp_ytd}")
 
                 cmd = [
                     str(args.ytd_tool_path),
@@ -839,7 +856,10 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
                     "0",
                     "0",
                 ]
-                result = run_logged(cmd, args.ytd_tool_path.parent, log)
+                tool_env = isolated_tool_environment(tool_temp)
+                log.write(f"isolated TEMP={tool_temp}\n")
+                with YTD_TOOL_LOCK:
+                    result = run_logged(cmd, args.ytd_tool_path.parent, log, env=tool_env)
                 if result.returncode != 0:
                     raise RuntimeError(f"YtdTools failed for {ytd_path.name} rc={result.returncode}")
 
