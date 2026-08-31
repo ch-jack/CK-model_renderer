@@ -1,8 +1,10 @@
 import importlib.util
+import struct
 import sys
 import tempfile
 import types
 import unittest
+import zlib
 from enum import Enum, auto
 from pathlib import Path
 from unittest.mock import patch
@@ -196,6 +198,97 @@ class WeaponDiffusePreviewTests(unittest.TestCase):
 
         self.assertIsNone(restored)
         self.assertIs(source_node, base.links[0].from_node)
+
+
+class FakeColorSpace:
+    def __init__(self):
+        self.is_data = False
+        self.name = "sRGB"
+
+
+class FakeImage:
+    def __init__(self, path):
+        self.filepath = str(path)
+        self.name = Path(path).name
+        self.colorspace_settings = FakeColorSpace()
+
+
+class FakeImages:
+    def __init__(self):
+        self.items = []
+
+    def load(self, path, check_existing=True):
+        if check_existing:
+            for image in self.items:
+                if image.filepath == str(path):
+                    return image
+        image = FakeImage(path)
+        self.items.append(image)
+        return image
+
+
+class TextureRoleIsolationTests(unittest.TestCase):
+    def test_reused_diffuse_and_data_texture_get_separate_images(self):
+        images = FakeImages()
+        fake_data = types.SimpleNamespace(images=images)
+        cache = {}
+        texture_path = Path("silver.png")
+
+        with patch.object(RENDERER.bpy, "data", fake_data, create=True):
+            color = RENDERER.load_texture_image_for_role(texture_path, False, cache)
+            data = RENDERER.load_texture_image_for_role(texture_path, True, cache)
+            same_color = RENDERER.load_texture_image_for_role(texture_path, False, cache)
+
+        self.assertIsNot(color, data)
+        self.assertIs(color, same_color)
+        self.assertFalse(color.colorspace_settings.is_data)
+        self.assertTrue(data.colorspace_settings.is_data)
+        self.assertEqual(2, len(images.items))
+
+
+class WeaponLightingTests(unittest.TestCase):
+    def test_png_metrics_reads_rgba_without_blender_pixel_access(self):
+        def chunk(chunk_type, data):
+            payload = chunk_type + data
+            return struct.pack(">I", len(data)) + payload + struct.pack(">I", zlib.crc32(payload))
+
+        ihdr = struct.pack(">IIBBBBB", 2, 1, 8, 6, 0, 0, 0)
+        pixels = bytes((0, 0, 0, 255, 255, 255, 255, 255))
+        png = (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(b"\x00" + pixels))
+            + chunk(b"IEND", b"")
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sample.png"
+            path.write_bytes(png)
+            metrics = RENDERER.rendered_png_metrics(path, max_samples=10)
+
+        self.assertEqual(2, metrics["samples"])
+        self.assertAlmostEqual(0.5, metrics["mean"], places=3)
+        self.assertAlmostEqual(0.5, metrics["bright"], places=3)
+
+    def test_normal_weapon_render_keeps_original_lighting(self):
+        factor = RENDERER.weapon_light_correction_factor(
+            {"mean": 0.71, "bright": 0.28, "saturation": 0.2}
+        )
+        self.assertEqual(1.0, factor)
+
+    def test_washed_out_weapon_render_receives_strong_correction(self):
+        factor = RENDERER.weapon_light_correction_factor(
+            {"mean": 0.88, "bright": 0.80, "saturation": 0.03}
+        )
+        self.assertGreaterEqual(factor, 0.08)
+        self.assertLessEqual(factor, 0.10)
+
+    def test_borderline_bright_weapon_uses_gentler_correction(self):
+        factor = RENDERER.weapon_light_correction_factor(
+            {"mean": 0.77, "bright": 0.45, "saturation": 0.08}
+        )
+        self.assertGreater(factor, 0.11)
+        self.assertLessEqual(factor, 0.12)
+
 
 if __name__ == "__main__":
     unittest.main()

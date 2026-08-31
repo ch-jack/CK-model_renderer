@@ -12,7 +12,7 @@
 3. 扫描 `.yft`、`.ydr`、`.ydd`、`.ymap`。
 4. 从本地 `.ytd` 和共享 `vehshare.ytd` 提取贴图。
 5. 调用 Blender/Sollumz 导入模型、绑定贴图并渲染。
-   YDR 内嵌贴图会直接保留；饰品自动使用 Cycles 和 AgX Punchy 柔光棚拍，只有带同名 YCD 动画的姿态模型使用正面特写。
+   YDR 内嵌贴图会直接保留；饰品自动使用 Cycles 和 AgX Punchy 柔光棚拍，只有带同名 YCD 动画的姿态模型使用正面特写。武器会分析首次渲染的亮度，达到过曝阈值时自动降低棚灯并重渲染；颜色贴图与 Bump/Spec 等数据通道会隔离颜色空间。
 6. 输出棚拍/白底预览、绿幕预览、裁边透明 PNG、完整画布 `_alpha` PNG 和贴图报告。
 
 所有解包和纹理中间文件都写入本次输出目录的 `_temp`，不再占用系统临时目录；正常结束自动删除，使用 `--keep-work` 时保留为 `_work`。开始处理前会检查 Blender 版本和运行目录空间，要求 Blender 4.2+（推荐 5.1）且至少剩余 1 GB。
@@ -232,6 +232,10 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 ### 贴图缺失
 
 看 `_texture_report.txt`，按缺失的贴图名补 `.ytd`。
+
+### 武器颜色发白或浅色贴图失去饱和度
+
+新版会在首次渲染后记录 `Weapon brightness`。只有平均亮度和高亮像素比例都超过阈值时，才会降低武器棚灯并自动重渲染；正常深色模型保持原灯光。若同一贴图被 YDR 同时指定给 Diffuse、Bump 和 Spec，新版会为颜色与数据用途建立独立 Image，确保 Diffuse 使用 sRGB。
 
 ## 10. 内置依赖
 

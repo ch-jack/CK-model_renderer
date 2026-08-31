@@ -3,9 +3,11 @@ import json
 import math
 import os
 import re
+import struct
 import sys
 import time
 import traceback
+import zlib
 from pathlib import Path
 
 import bpy
@@ -797,6 +799,29 @@ def set_image_color_space(image, is_data):
             image.colorspace_settings.name = "Non-Color" if is_data else "sRGB"
         except Exception:
             pass
+
+
+def texture_role_cache_key(path, is_data):
+    resolved = os.path.normcase(str(Path(path).resolve()))
+    return resolved, bool(is_data)
+
+
+def load_texture_image_for_role(path, is_data, role_images=None):
+    role_images = role_images if role_images is not None else {}
+    key = texture_role_cache_key(path, is_data)
+    cached = role_images.get(key)
+    if cached is not None:
+        return cached
+
+    image = bpy.data.images.load(str(path), check_existing=True)
+    opposite = role_images.get((key[0], not key[1]))
+    if opposite is image:
+        image = bpy.data.images.load(str(path), check_existing=False)
+        role_name = "data" if is_data else "color"
+        image.name = f"{Path(path).name} [{role_name}]"
+    set_image_color_space(image, is_data)
+    role_images[key] = image
+    return image
 
 
 def make_solid_image(name, color, is_data=False):
@@ -1660,7 +1685,7 @@ def restore_weapon_diffuse_preview(material_obj, bsdf, color_node):
     return normalized_texture_name(color_image.name)
 
 
-def bind_weapon_pbr_materials(texture_index, texture_manifest):
+def bind_weapon_pbr_materials(texture_index, texture_manifest, role_images=None):
     local_texture_names = texture_manifest.get("local", set())
     if not local_texture_names:
         return 0
@@ -1668,8 +1693,7 @@ def bind_weapon_pbr_materials(texture_index, texture_manifest):
     if texture_path is None:
         return 0
 
-    image = bpy.data.images.load(str(texture_path), check_existing=True)
-    set_image_color_space(image, False)
+    image = load_texture_image_for_role(texture_path, False, role_images)
     linked = 0
     names = []
     for material_obj in used_mesh_materials():
@@ -1702,10 +1726,10 @@ def bind_weapon_pbr_materials(texture_index, texture_manifest):
     return linked
 
 
-def bind_generic_asset_texture(texture_index, texture_manifest, job):
+def bind_generic_asset_texture(texture_index, texture_manifest, job, role_images=None):
     asset_kind = job.get("asset_kind", "vehicle")
     if asset_kind == "weapon":
-        return bind_weapon_pbr_materials(texture_index, texture_manifest)
+        return bind_weapon_pbr_materials(texture_index, texture_manifest, role_images)
     if asset_kind == "vehicle":
         return 0
     local_texture_names = texture_manifest.get("local", set())
@@ -1715,8 +1739,7 @@ def bind_generic_asset_texture(texture_index, texture_manifest, job):
     texture_path = find_generic_asset_texture(texture_index, local_texture_names)
     if texture_path is None:
         return 0
-    image = bpy.data.images.load(str(texture_path), check_existing=True)
-    set_image_color_space(image, False)
+    image = load_texture_image_for_role(texture_path, False, role_images)
     linked = 0
     names = []
     for material_obj in bpy.data.materials:
@@ -1750,7 +1773,7 @@ def wheel_object_material_names():
     return names
 
 
-def bind_untextured_materials(texture_index, texture_manifest):
+def bind_untextured_materials(texture_index, texture_manifest, role_images=None):
     local_texture_names = texture_manifest.get("local", set())
     wheel_materials = wheel_object_material_names()
     linked = 0
@@ -1770,8 +1793,7 @@ def bind_untextured_materials(texture_index, texture_manifest):
             if base_color_has_upstream_texture(node):
                 continue
             if image is None:
-                image = bpy.data.images.load(str(texture_path), check_existing=True)
-                set_image_color_space(image, False)
+                image = load_texture_image_for_role(texture_path, False, role_images)
             if link_image_to_base_color(material_obj, node, image, texture_path.stem):
                 linked += 1
                 names.append(f"{material_obj.name}->{texture_path.stem}")
@@ -1781,7 +1803,7 @@ def bind_untextured_materials(texture_index, texture_manifest):
     return linked
 
 
-def bind_auto_livery_materials(texture_index, job, texture_manifest):
+def bind_auto_livery_materials(texture_index, job, texture_manifest, role_images=None):
     livery_path = find_livery_texture(
         texture_index,
         job.get("model", ""),
@@ -1789,8 +1811,7 @@ def bind_auto_livery_materials(texture_index, job, texture_manifest):
     )
     if not livery_path:
         return 0
-    livery_image = bpy.data.images.load(str(livery_path), check_existing=True)
-    set_image_color_space(livery_image, False)
+    livery_image = load_texture_image_for_role(livery_path, False, role_images)
 
     linked = 0
     names = []
@@ -2075,7 +2096,8 @@ def image_has_useful_alpha(image):
     if image is None or getattr(image, "channels", 0) < 4:
         return False
     try:
-        pixels = image.pixels
+        pixels = array("f", [0.0]) * (pixel_count * 4)
+        image.pixels.foreach_get(pixels)
         pixel_count = len(pixels) // 4
         step = max(pixel_count // 512, 1)
         return any(pixels[index * 4 + 3] < 0.98 for index in range(0, pixel_count, step))
@@ -2596,6 +2618,7 @@ def bind_extracted_textures(job):
 
     matched = 0
     missing = set()
+    role_images = {}
     for material_obj in bpy.data.materials:
         if not material_obj.use_nodes or not material_obj.node_tree:
             continue
@@ -2618,8 +2641,11 @@ def bind_extracted_textures(job):
                     missing.add(candidates[0])
                 continue
 
-            image = bpy.data.images.load(str(texture_path), check_existing=True)
-            set_image_color_space(image, is_non_color_node(node, texture_path))
+            image = load_texture_image_for_role(
+                texture_path,
+                is_non_color_node(node, texture_path),
+                role_images,
+            )
             node.image = image
             try:
                 node.sollumz_texture_name = texture_path.stem
@@ -2631,9 +2657,9 @@ def bind_extracted_textures(job):
         preview = ", ".join(sorted(missing)[:24])
         suffix = "..." if len(missing) > 24 else ""
         print(f"Texture bind missing {len(missing)}: {preview}{suffix}")
-    livery_links = bind_auto_livery_materials(texture_index, job, texture_manifest)
-    generic_links = bind_generic_asset_texture(texture_index, texture_manifest, job)
-    part_links = bind_untextured_materials(texture_index, texture_manifest)
+    livery_links = bind_auto_livery_materials(texture_index, job, texture_manifest, role_images)
+    generic_links = bind_generic_asset_texture(texture_index, texture_manifest, job, role_images)
+    part_links = bind_untextured_materials(texture_index, texture_manifest, role_images)
     window_tunes = tune_window_materials()
     paint_tones = apply_vehicle_paint_tones()
     surface_tunes = tune_semantic_materials(bool(job.get("special_lights", True)))
@@ -3003,6 +3029,188 @@ def setup_render(job):
         pass
 
 
+def rendered_png_metrics(path, max_samples=60000):
+    payload = Path(path).read_bytes()
+    if payload[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("render output is not a PNG")
+    offset = 8
+    width = height = bit_depth = color_type = interlace = None
+    compressed = bytearray()
+    while offset + 12 <= len(payload):
+        chunk_length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        chunk_type = payload[offset + 4 : offset + 8]
+        chunk_data = payload[offset + 8 : offset + 8 + chunk_length]
+        offset += 12 + chunk_length
+        if chunk_type == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(
+                ">IIBBBBB", chunk_data
+            )
+        elif chunk_type == b"IDAT":
+            compressed.extend(chunk_data)
+        elif chunk_type == b"IEND":
+            break
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color_type)
+    if not width or not height or bit_depth != 8 or interlace != 0 or channels is None:
+        raise ValueError(
+            f"unsupported PNG format: {width}x{height} depth={bit_depth} "
+            f"color_type={color_type} interlace={interlace}"
+        )
+
+    raw = zlib.decompress(bytes(compressed))
+    row_bytes = width * channels
+    expected = (row_bytes + 1) * height
+    if len(raw) != expected:
+        raise ValueError(f"PNG payload size mismatch: {len(raw)} != {expected}")
+    pixel_count = width * height
+    sample_step = max(1, pixel_count // max(int(max_samples), 1))
+    previous = bytearray(row_bytes)
+    samples = 0
+    luminance_total = 0.0
+    saturation_total = 0.0
+    bright_samples = 0
+    raw_offset = 0
+    for row_index in range(height):
+        filter_type = raw[raw_offset]
+        filtered = raw[raw_offset + 1 : raw_offset + 1 + row_bytes]
+        raw_offset += row_bytes + 1
+        row = bytearray(row_bytes)
+        for index, value in enumerate(filtered):
+            left = row[index - channels] if index >= channels else 0
+            above = previous[index]
+            upper_left = previous[index - channels] if index >= channels else 0
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = above
+            elif filter_type == 3:
+                predictor = (left + above) // 2
+            elif filter_type == 4:
+                estimate = left + above - upper_left
+                left_distance = abs(estimate - left)
+                above_distance = abs(estimate - above)
+                upper_left_distance = abs(estimate - upper_left)
+                if left_distance <= above_distance and left_distance <= upper_left_distance:
+                    predictor = left
+                elif above_distance <= upper_left_distance:
+                    predictor = above
+                else:
+                    predictor = upper_left
+            else:
+                raise ValueError(f"unsupported PNG filter: {filter_type}")
+            row[index] = (value + predictor) & 0xFF
+
+        for column in range(width):
+            pixel_index = row_index * width + column
+            if pixel_index % sample_step:
+                continue
+            pixel_offset = column * channels
+            if color_type == 6:
+                red, green, blue, alpha = row[pixel_offset : pixel_offset + 4]
+            elif color_type == 2:
+                red, green, blue = row[pixel_offset : pixel_offset + 3]
+                alpha = 255
+            elif color_type == 4:
+                red = green = blue = row[pixel_offset]
+                alpha = row[pixel_offset + 1]
+            else:
+                red = green = blue = row[pixel_offset]
+                alpha = 255
+            if alpha <= 25:
+                continue
+            red /= 255.0
+            green /= 255.0
+            blue /= 255.0
+            luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+            maximum = max(red, green, blue)
+            minimum = min(red, green, blue)
+            saturation = (maximum - minimum) / maximum if maximum > 0.0 else 0.0
+            samples += 1
+            luminance_total += luminance
+            saturation_total += saturation
+            if luminance > 0.85:
+                bright_samples += 1
+        previous = row
+
+    if not samples:
+        return {"samples": 0, "mean": 0.0, "bright": 0.0, "saturation": 0.0}
+    return {
+        "samples": samples,
+        "mean": luminance_total / samples,
+        "bright": bright_samples / samples,
+        "saturation": saturation_total / samples,
+    }
+
+
+def weapon_light_correction_factor(metrics):
+    mean = float(metrics.get("mean", 0.0))
+    bright = float(metrics.get("bright", 0.0))
+    if mean < 0.75 or bright < 0.40:
+        return 1.0
+    severity = max(
+        min(max((mean - 0.75) / 0.18, 0.0), 1.0),
+        min(max((bright - 0.40) / 0.55, 0.0), 1.0),
+    )
+    return 0.12 - 0.04 * severity
+
+
+def scale_scene_lighting(factor):
+    factor = max(float(factor), 0.0)
+    lights = 0
+    for obj in bpy.context.scene.objects:
+        if obj.type != "LIGHT":
+            continue
+        obj.data.energy *= factor
+        lights += 1
+    world_strength = None
+    world = bpy.context.scene.world
+    if world and world.node_tree:
+        background = world.node_tree.nodes.get("Background")
+        if background is not None:
+            background.inputs["Strength"].default_value *= factor
+            world_strength = float(background.inputs["Strength"].default_value)
+    return lights, world_strength
+
+
+def apply_weapon_auto_lighting(job, output_path):
+    if ASSET_KIND != "weapon" or not bool(job.get("weapon_auto_lighting", True)):
+        return False
+    try:
+        before = rendered_png_metrics(output_path)
+    except Exception as exc:
+        print(f"Weapon brightness analysis failed: {exc}")
+        return False
+    print(
+        "Weapon brightness: "
+        f"mean={before['mean']:.3f} bright={before['bright']:.1%} "
+        f"saturation={before['saturation']:.3f} samples={before['samples']}"
+    )
+    factor = weapon_light_correction_factor(before)
+    if factor >= 0.999:
+        return False
+
+    light_count, world_strength = scale_scene_lighting(factor)
+    world_text = "-" if world_strength is None else f"{world_strength:.4f}"
+    print(
+        f"Weapon auto lighting: factor={factor:.3f} lights={light_count} "
+        f"world_strength={world_text}"
+    )
+    render_result = bpy.ops.render.render(write_still=True)
+    if isinstance(render_result, set) and "CANCELLED" in render_result:
+        raise RuntimeError("Weapon auto-lighting render was cancelled")
+    try:
+        after = rendered_png_metrics(output_path)
+        print(
+            "Weapon brightness corrected: "
+            f"mean={after['mean']:.3f} bright={after['bright']:.1%} "
+            f"saturation={after['saturation']:.3f}"
+        )
+    except Exception as exc:
+        print(f"Weapon corrected brightness analysis failed: {exc}")
+    return True
+
+
 def green_key_alpha(r, g, b, threshold):
     if g < 0.25:
         return 1.0
@@ -3339,6 +3547,9 @@ def main():
                 print(f"Render Result fallback failed: {exc}")
     if not output_path.exists():
         raise RuntimeError(f"Render output missing: {output_path}")
+    lighting_corrected = apply_weapon_auto_lighting(job, output_path)
+    if lighting_corrected and job.get("save_blend"):
+        bpy.ops.wm.save_as_mainfile(filepath=str(Path(job["blend_path"])))
     if job.get("cutout_path"):
         save_green_preview_and_cutout(
             output_path,
