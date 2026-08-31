@@ -47,6 +47,7 @@ GENERATED_OUTPUT_NAMES = {
 }
 SCAN_PROGRESS_INTERVAL = 1000
 YTD_TOOL_LOCK = threading.Lock()
+AUTO_SHARED_YTD_PATTERNS = ("vehshare*.ytd", "omex_collection_*.ytd")
 
 
 @dataclass(frozen=True)
@@ -571,7 +572,8 @@ def collect_shared_ytds(input_dir: Path, specs: list[str], auto_shared: bool) ->
     if auto_shared:
         for root in (input_dir, SCRIPT_DIR, SCRIPT_DIR / "shared_ytd"):
             if root.is_dir():
-                shared.extend(p for p in root.rglob("vehshare*.ytd") if p.is_file())
+                for pattern in AUTO_SHARED_YTD_PATTERNS:
+                    shared.extend(p for p in root.rglob(pattern) if p.is_file())
 
     return dedupe_paths(shared)
 
@@ -2058,7 +2060,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="YTD selection. Default match loads only the model dictionary and delimiter-suffixed companions.",
     )
     parser.add_argument("--shared-ytd", action="append", default=[], help="Extra shared .ytd file or folder, for example exported vehshare.ytd.")
-    parser.add_argument("--no-auto-shared-ytd", action="store_true", help="Do not auto-scan input/shared_ytd for vehshare*.ytd.")
+    parser.add_argument(
+        "--no-auto-shared-ytd",
+        action="store_true",
+        help="Do not auto-scan for known shared dictionaries such as vehshare and omex_collection_*.ytd.",
+    )
     parser.add_argument("--skip-textures", action="store_true", help="Do not extract or bind .ytd textures.")
     parser.add_argument("--texture-format", choices=("png", "dds"), default="png", help="Texture format passed to Blender.")
     parser.add_argument("--ytd-tool", default="", help="Path to CodeWalker-based YtdTools.exe.")

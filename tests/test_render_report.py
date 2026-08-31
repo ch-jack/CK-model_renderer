@@ -20,6 +20,7 @@ from render_all_vehicles import (
     RenderJobResult,
     VehicleJob,
     build_arg_parser,
+    collect_shared_ytds,
     execute_render_jobs,
     extract_textures_for_job,
     isolated_tool_environment,
@@ -204,6 +205,23 @@ class ModelRenderReportTests(unittest.TestCase):
 
 
 class YtdMatchingTests(unittest.TestCase):
+    def test_auto_shared_ytds_include_confirmed_cross_weapon_dictionaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            nested = root / "stream" / "WEAPON_SHARED"
+            nested.mkdir(parents=True)
+            vehshare = root / "vehshare.ytd"
+            kawai = nested / "omex_collection_kawai.ytd"
+            regular = nested / "weapon_local.ytd"
+            for path in (vehshare, kawai, regular):
+                path.write_bytes(b"ytd")
+
+            shared = collect_shared_ytds(root, [], True)
+
+            self.assertIn(vehshare.resolve(), shared)
+            self.assertIn(kawai.resolve(), shared)
+            self.assertNotIn(regular.resolve(), shared)
+
     def test_match_mode_uses_exact_and_delimited_companions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

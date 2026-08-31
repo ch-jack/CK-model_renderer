@@ -10,7 +10,7 @@
 1. 解包 `.zip` / `.rar` / `.7z`。
 2. 解包找到的 `.rpf`。
 3. 扫描 `.yft`、`.ydr`、`.ydd`、`.ymap`。
-4. 从本地 `.ytd` 和共享 `vehshare.ytd` 提取贴图。
+4. 从本地 `.ytd` 和已确认的共享字典提取贴图；除 `vehshare.ytd` 外，也会自动发现跨武器共用的 `omex_collection_*.ytd`。
 5. 调用 Blender/Sollumz 导入模型、绑定贴图并渲染。
    YDR 内嵌贴图会直接保留；饰品自动使用 Cycles 和 AgX Punchy 柔光棚拍，只有带同名 YCD 动画的姿态模型使用正面特写。武器会分析首次渲染的亮度，达到过曝阈值时自动降低棚灯并重渲染；颜色贴图与 Bump/Spec 等数据通道会隔离颜色空间。
 6. 输出棚拍/白底预览、绿幕预览、裁边透明 PNG、完整画布 `_alpha` PNG 和贴图报告。
@@ -231,7 +231,7 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 
 ### 贴图缺失
 
-看 `_texture_report.txt`，按缺失的贴图名补 `.ytd`。
+看 `_texture_report.txt`，按缺失的贴图名补 `.ytd`。已确认跨武器共用的 `omex_collection_*.ytd` 会自动作为共享字典加载；其他特殊共享字典可用 `--shared-ytd` 显式传入。
 
 ### 武器颜色发白或浅色贴图失去饱和度
 
