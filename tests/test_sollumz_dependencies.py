@@ -213,6 +213,23 @@ class FakeImage:
         self.colorspace_settings = FakeColorSpace()
 
 
+class FakeNativeTexture:
+    def __init__(self, name=None, invalid=False):
+        self._name = name
+        self.invalid = invalid
+
+    @property
+    def name(self):
+        if self.invalid:
+            raise UnicodeDecodeError("utf-8", b"\xf7", 0, 1, "invalid start byte")
+        return self._name
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+        self.invalid = False
+
+
 class FakeImages:
     def __init__(self):
         self.items = []
@@ -228,6 +245,25 @@ class FakeImages:
 
 
 class TextureRoleIsolationTests(unittest.TestCase):
+    def test_unknown_integer_vertex_layout_falls_back_to_default(self):
+        enum_type = types.SimpleNamespace(DEFAULT="default")
+
+        self.assertEqual(
+            "default",
+            RENDERER.fallback_native_vertex_data_type(enum_type, 0x6755555555996996),
+        )
+        self.assertIsNone(RENDERER.fallback_native_vertex_data_type(enum_type, "invalid"))
+
+    def test_invalid_native_texture_names_are_replaced_deterministically(self):
+        valid = FakeNativeTexture("diffuse")
+        invalid = FakeNativeTexture(invalid=True)
+
+        renamed = RENDERER.sanitize_invalid_native_texture_names([valid, invalid])
+
+        self.assertEqual(["embedded_texture_001"], renamed)
+        self.assertEqual("diffuse", valid.name)
+        self.assertEqual("embedded_texture_001", invalid.name)
+
     def test_reused_diffuse_and_data_texture_get_separate_images(self):
         images = FakeImages()
         fake_data = types.SimpleNamespace(images=images)
@@ -288,6 +324,26 @@ class WeaponLightingTests(unittest.TestCase):
         )
         self.assertGreater(factor, 0.11)
         self.assertLessEqual(factor, 0.12)
+
+    def test_washed_out_weapon_just_below_old_cutoff_is_corrected(self):
+        factor = RENDERER.weapon_light_correction_factor(
+            {"mean": 0.823, "bright": 0.389, "saturation": 0.08}
+        )
+        self.assertGreaterEqual(factor, 0.10)
+        self.assertLess(factor, 1.0)
+
+    def test_bright_but_not_widespread_highlights_keep_original_lighting(self):
+        factor = RENDERER.weapon_light_correction_factor(
+            {"mean": 0.79, "bright": 0.29, "saturation": 0.28}
+        )
+        self.assertEqual(1.0, factor)
+
+    def test_followup_correction_uses_a_conservative_floor(self):
+        factor = RENDERER.weapon_light_correction_factor(
+            {"mean": 0.77, "bright": 0.314, "saturation": 0.08},
+            minimum_factor=0.25,
+        )
+        self.assertEqual(0.25, factor)
 
 
 if __name__ == "__main__":

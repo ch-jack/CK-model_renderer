@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import errno
 import html
@@ -684,6 +685,57 @@ def run_logged(cmd: list[str], cwd: Path, log, env: dict[str, str] | None = None
     return result
 
 
+def codewalker_ytd_fallback_command(ytd_path: Path, dds_dir: Path, tools_dir: Path) -> list[str] | None:
+    dependencies = (
+        tools_dir / "SharpDX.dll",
+        tools_dir / "SharpDX.Mathematics.dll",
+        tools_dir / "CodeWalker.Core.dll",
+    )
+    if os.name != "nt" or not all(path.is_file() for path in dependencies):
+        return None
+
+    def ps_literal(path: Path) -> str:
+        return str(path.resolve()).replace("'", "''")
+
+    script = f"""
+$ErrorActionPreference = 'Stop'
+Add-Type -Path '{ps_literal(dependencies[0])}'
+Add-Type -Path '{ps_literal(dependencies[1])}'
+Add-Type -Path '{ps_literal(dependencies[2])}'
+$inputPath = '{ps_literal(ytd_path)}'
+$outputDirectory = '{ps_literal(dds_dir)}'
+$ytd = New-Object CodeWalker.GameFiles.YtdFile
+$ytd.Load([IO.File]::ReadAllBytes($inputPath))
+$textures = $ytd.TextureDict.Textures
+$seen = @{{}}
+for ($index = 0; $index -lt $textures.Count; $index++) {{
+    $texture = $textures[$index]
+    try {{ $name = $texture.Name }} catch {{ $name = 'embedded_texture_{{0:D3}}' -f $index }}
+    $leaf = $name.Replace([char]92, [char]47).Split('/')[-1]
+    if ($leaf.EndsWith('.dds', [StringComparison]::OrdinalIgnoreCase)) {{
+        $leaf = $leaf.Substring(0, $leaf.Length - 4)
+    }}
+    $safe = [regex]::Replace($leaf, '[^A-Za-z0-9_.-]', '_')
+    if ([string]::IsNullOrWhiteSpace($safe)) {{ $safe = 'embedded_texture_{{0:D3}}' -f $index }}
+    $base = $safe
+    $suffix = 1
+    while ($seen.ContainsKey($safe.ToLowerInvariant())) {{
+        $safe = '{{0}}_{{1}}' -f $base, $suffix
+        $suffix++
+    }}
+    $seen[$safe.ToLowerInvariant()] = $true
+    $texture.Name = $safe
+}}
+$null = [CodeWalker.GameFiles.YtdXml]::GetXml($ytd, $outputDirectory)
+if (-not (Get-ChildItem -LiteralPath $outputDirectory -File -Filter '*.dds')) {{
+    throw 'CodeWalker fallback produced no DDS files.'
+}}
+"""
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return [str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+
+
 def isolated_tool_environment(temp_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
     temp_path = str(temp_dir.resolve())
@@ -863,7 +915,27 @@ def extract_textures_for_job(job: VehicleJob, args) -> None:
                 with YTD_TOOL_LOCK:
                     result = run_logged(cmd, args.ytd_tool_path.parent, log, env=tool_env)
                 if result.returncode != 0:
-                    raise RuntimeError(f"YtdTools failed for {ytd_path.name} rc={result.returncode}")
+                    fallback_cmd = codewalker_ytd_fallback_command(
+                        tmp_ytd,
+                        dds_dir,
+                        args.ytd_tool_path.parent,
+                    )
+                    if fallback_cmd is None:
+                        raise RuntimeError(f"YtdTools failed for {ytd_path.name} rc={result.returncode}")
+                    for partial_dds in dds_dir.glob("*.dds"):
+                        partial_dds.unlink()
+                    log.write(
+                        f"YtdTools failed for {ytd_path.name} rc={result.returncode}; "
+                        "trying CodeWalker safe-name fallback.\n"
+                    )
+                    fallback = run_logged(fallback_cmd, args.ytd_tool_path.parent, log, env=tool_env)
+                    if fallback.returncode != 0:
+                        raise RuntimeError(
+                            f"YtdTools failed for {ytd_path.name} rc={result.returncode}; "
+                            f"CodeWalker fallback rc={fallback.returncode}"
+                        )
+                    log.write(f"CodeWalker safe-name fallback succeeded: {ytd_path.name}\n")
+                    log.flush()
 
                 dds_files = sorted(dds_dir.glob("*.dds"))
                 total_dds += len(dds_files)

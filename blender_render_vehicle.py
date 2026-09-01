@@ -291,6 +291,88 @@ def ensure_sollumz(job):
     raise RuntimeError("Could not enable a complete Sollumz runtime. " + " | ".join(errors))
 
 
+def sanitize_invalid_native_texture_names(textures, prefix="embedded_texture"):
+    renamed = []
+    for index, texture in enumerate(textures):
+        try:
+            texture.name
+        except UnicodeDecodeError:
+            replacement = f"{prefix}_{index:03d}"
+            texture.name = replacement
+            renamed.append(replacement)
+    return renamed
+
+
+def fallback_native_vertex_data_type(enum_type, value):
+    if isinstance(value, int):
+        return enum_type.DEFAULT
+    return None
+
+
+def install_native_asset_compatibility_guards():
+    try:
+        from szio.gta5.native.adapters.drawable import NativeDrawable
+        from szio.gta5.drawables import VertexDataType
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+    installed = False
+    shader_group_property = getattr(NativeDrawable, "shader_group", None)
+    original_getter = getattr(shader_group_property, "fget", None)
+    if original_getter is not None and not getattr(original_getter, "_ck_safe_texture_names", False):
+        def safe_shader_group(self):
+            native_group = getattr(self._inner, "shader_group", None)
+            renamed = []
+            if native_group is not None:
+                texture_dictionary = getattr(native_group, "texture_dictionary", None)
+                if texture_dictionary is not None:
+                    renamed.extend(
+                        sanitize_invalid_native_texture_names(texture_dictionary.textures.values())
+                    )
+                for shader_index, shader in enumerate(native_group.shaders):
+                    for parameter_index, parameter in enumerate(shader.parameters):
+                        data = parameter.data
+                        try:
+                            data.name
+                        except UnicodeDecodeError:
+                            replacement = f"embedded_parameter_{shader_index:03d}_{parameter_index:03d}"
+                            data.name = replacement
+                            renamed.append(replacement)
+                        except AttributeError:
+                            continue
+            if renamed:
+                print("Sanitized invalid embedded texture names: " + ", ".join(dict.fromkeys(renamed)))
+            return original_getter(self)
+
+        safe_shader_group._ck_safe_texture_names = True
+        NativeDrawable.shader_group = property(
+            safe_shader_group,
+            shader_group_property.fset,
+            shader_group_property.fdel,
+            shader_group_property.__doc__,
+        )
+        installed = True
+
+    current_missing = VertexDataType.__dict__.get("_missing_")
+    if not getattr(current_missing, "_ck_default_unknown_layout", False):
+        original_missing = VertexDataType._missing_
+
+        def default_unknown_layout(cls, value):
+            known = original_missing(value)
+            if known is not None:
+                return known
+            fallback = fallback_native_vertex_data_type(cls, value)
+            if fallback is not None:
+                print(f"Unsupported native vertex layout {value:#018x}; using DEFAULT layout")
+            return fallback
+
+        default_unknown_layout._ck_default_unknown_layout = True
+        VertexDataType._missing_ = classmethod(default_unknown_layout)
+        installed = True
+
+    return installed
+
+
 def call_sollumz_operator(name, **kwargs):
     operator = getattr(bpy.ops.sollumz, name)
     props = operator.get_rna_type().properties.keys()
@@ -3143,16 +3225,16 @@ def rendered_png_metrics(path, max_samples=60000):
     }
 
 
-def weapon_light_correction_factor(metrics):
+def weapon_light_correction_factor(metrics, minimum_factor=0.08):
     mean = float(metrics.get("mean", 0.0))
     bright = float(metrics.get("bright", 0.0))
-    if mean < 0.75 or bright < 0.40:
+    if mean < 0.75 or bright < 0.30:
         return 1.0
     severity = max(
         min(max((mean - 0.75) / 0.18, 0.0), 1.0),
-        min(max((bright - 0.40) / 0.55, 0.0), 1.0),
+        min(max((bright - 0.30) / 0.65, 0.0), 1.0),
     )
-    return 0.12 - 0.04 * severity
+    return max(float(minimum_factor), 0.12 - 0.04 * severity)
 
 
 def scale_scene_lighting(factor):
@@ -3186,29 +3268,35 @@ def apply_weapon_auto_lighting(job, output_path):
         f"mean={before['mean']:.3f} bright={before['bright']:.1%} "
         f"saturation={before['saturation']:.3f} samples={before['samples']}"
     )
-    factor = weapon_light_correction_factor(before)
-    if factor >= 0.999:
-        return False
+    metrics = before
+    corrected = False
+    for pass_index in range(2):
+        minimum_factor = 0.08 if pass_index == 0 else 0.25
+        factor = weapon_light_correction_factor(metrics, minimum_factor)
+        if factor >= 0.999:
+            break
 
-    light_count, world_strength = scale_scene_lighting(factor)
-    world_text = "-" if world_strength is None else f"{world_strength:.4f}"
-    print(
-        f"Weapon auto lighting: factor={factor:.3f} lights={light_count} "
-        f"world_strength={world_text}"
-    )
-    render_result = bpy.ops.render.render(write_still=True)
-    if isinstance(render_result, set) and "CANCELLED" in render_result:
-        raise RuntimeError("Weapon auto-lighting render was cancelled")
-    try:
-        after = rendered_png_metrics(output_path)
+        light_count, world_strength = scale_scene_lighting(factor)
+        world_text = "-" if world_strength is None else f"{world_strength:.4f}"
         print(
-            "Weapon brightness corrected: "
-            f"mean={after['mean']:.3f} bright={after['bright']:.1%} "
-            f"saturation={after['saturation']:.3f}"
+            f"Weapon auto lighting: pass={pass_index + 1} factor={factor:.3f} "
+            f"lights={light_count} world_strength={world_text}"
         )
-    except Exception as exc:
-        print(f"Weapon corrected brightness analysis failed: {exc}")
-    return True
+        render_result = bpy.ops.render.render(write_still=True)
+        if isinstance(render_result, set) and "CANCELLED" in render_result:
+            raise RuntimeError("Weapon auto-lighting render was cancelled")
+        corrected = True
+        try:
+            metrics = rendered_png_metrics(output_path)
+            print(
+                f"Weapon brightness corrected: pass={pass_index + 1} "
+                f"mean={metrics['mean']:.3f} bright={metrics['bright']:.1%} "
+                f"saturation={metrics['saturation']:.3f}"
+            )
+        except Exception as exc:
+            print(f"Weapon corrected brightness analysis failed: {exc}")
+            break
+    return corrected
 
 
 def green_key_alpha(r, g, b, threshold):
@@ -3490,6 +3578,7 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     ensure_sollumz(job)
+    install_native_asset_compatibility_guards()
     clear_scene()
 
     asset_name = job.get("asset_name") or job.get("yft_name")

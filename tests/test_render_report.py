@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import concurrent.futures
+import base64
 import io
 import json
 import os
@@ -21,6 +22,7 @@ from render_all_vehicles import (
     VehicleJob,
     build_arg_parser,
     collect_shared_ytds,
+    codewalker_ytd_fallback_command,
     execute_render_jobs,
     extract_textures_for_job,
     isolated_tool_environment,
@@ -205,6 +207,23 @@ class ModelRenderReportTests(unittest.TestCase):
 
 
 class YtdMatchingTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "CodeWalker YTD fallback requires Windows")
+    def test_codewalker_ytd_fallback_command_sanitizes_texture_filenames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            tools = root / "tools"
+            tools.mkdir()
+            for name in ("SharpDX.dll", "SharpDX.Mathematics.dll", "CodeWalker.Core.dll"):
+                (tools / name).write_bytes(b"dll")
+            command = codewalker_ytd_fallback_command(root / "sample.ytd", root / "dds", tools)
+
+        self.assertIsNotNone(command)
+        self.assertEqual("-EncodedCommand", command[-2])
+        script = base64.b64decode(command[-1]).decode("utf-16le")
+        self.assertIn("Replace([char]92, [char]47)", script)
+        self.assertIn(".Split('/')[-1]", script)
+        self.assertIn("[CodeWalker.GameFiles.YtdXml]::GetXml", script)
+
     def test_auto_shared_ytds_include_confirmed_cross_weapon_dictionaries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

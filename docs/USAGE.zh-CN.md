@@ -10,7 +10,7 @@
 1. 解包 `.zip` / `.rar` / `.7z`。
 2. 解包找到的 `.rpf`。
 3. 扫描 `.yft`、`.ydr`、`.ydd`、`.ymap`。
-4. 从本地 `.ytd` 和已确认的共享字典提取贴图；除 `vehshare.ytd` 外，也会自动发现跨武器共用的 `omex_collection_*.ytd`。
+4. 从本地 `.ytd` 和已确认的共享字典提取贴图；除 `vehshare.ytd` 外，也会自动发现跨武器共用的 `omex_collection_*.ytd`。遇到 `pack:/name.dds` 等 Windows 非法贴图名时，常规提取失败后会自动使用 CodeWalker 安全名称回退提取。
 5. 调用 Blender/Sollumz 导入模型、绑定贴图并渲染。
    YDR 内嵌贴图会直接保留；饰品自动使用 Cycles 和 AgX Punchy 柔光棚拍，只有带同名 YCD 动画的姿态模型使用正面特写。武器会分析首次渲染的亮度，达到过曝阈值时自动降低棚灯并重渲染；颜色贴图与 Bump/Spec 等数据通道会隔离颜色空间。
 6. 输出棚拍/白底预览、绿幕预览、裁边透明 PNG、完整画布 `_alpha` PNG 和贴图报告。
@@ -235,7 +235,7 @@ python "D:\fivem\vehicle_renderer\render_all_vehicles.py" "D:\fivem\TestVeh" --a
 
 ### 武器颜色发白或浅色贴图失去饱和度
 
-新版会在首次渲染后记录 `Weapon brightness`。只有平均亮度和高亮像素比例都超过阈值时，才会降低武器棚灯并自动重渲染；正常深色模型保持原灯光。若同一贴图被 YDR 同时指定给 Diffuse、Bump 和 Spec，新版会为颜色与数据用途建立独立 Image，确保 Diffuse 使用 sRGB。
+新版会在首次渲染后记录 `Weapon brightness`。平均亮度达到 `0.75` 且高亮像素比例达到 `30%` 时，会降低武器棚灯并自动重渲染；第一次校正后仍超标时，会再进行一次较保守的柔光校正。正常深色模型保持原灯光。若同一贴图被 YDR 同时指定给 Diffuse、Bump 和 Spec，新版会为颜色与数据用途建立独立 Image，确保 Diffuse 使用 sRGB。原生 YDR 中非法 UTF-8 的内嵌贴图名会在内存中改为确定性的安全名称；截图导入遇到扩展顶点签名时会按已解析的默认几何布局继续，原始资源不会被修改。
 
 ## 10. 内置依赖
 
