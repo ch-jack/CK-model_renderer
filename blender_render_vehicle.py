@@ -938,9 +938,10 @@ def make_principled_material(name, color, roughness=0.35, metallic=0.0):
 
 def fallback_color_for_name(name):
     lower = name.lower()
-    if any(hint in lower for hint in ("normal", "nrm", "nrml", "bump")):
+    key = normalized_texture_name(name)
+    if any(hint in lower for hint in ("normal", "nrm", "nrml", "bump")) or key.endswith(("_n", "_nm", "_nrm")):
         return "normal", (0.5, 0.5, 1.0, 1.0), True
-    if any(hint in lower for hint in ("spec", "rough", "gloss")):
+    if any(hint in lower for hint in ("spec", "rough", "gloss")) or key.endswith("_s"):
         return "spec", (0.55, 0.55, 0.55, 1.0), True
     if any(hint in lower for hint in ("wheel", "rim", "brake", "disc")):
         return "wheel", (0.018, 0.018, 0.017, 1.0), False
@@ -2695,11 +2696,10 @@ def bind_extracted_textures(job):
     texture_manifest = load_texture_manifest(job)
     if not texture_index:
         print("Texture bind: no extracted textures")
-        write_texture_bind_report(job, texture_index, texture_manifest, 0, set(), 0, 0, 0, 0, 0)
-        return 0, 0
 
     matched = 0
     missing = set()
+    fallbacks = 0
     role_images = {}
     for material_obj in bpy.data.materials:
         if not material_obj.use_nodes or not material_obj.node_tree:
@@ -2719,8 +2719,18 @@ def bind_extracted_textures(job):
                     set_image_color_space(embedded_image, is_non_color_node(node, Path(embedded_image.name)))
                     matched += 1
                     continue
-                if candidates:
-                    missing.add(candidates[0])
+                requested_name = candidates[0] if candidates else getattr(embedded_image, "name", node.name)
+                if requested_name:
+                    missing.add(requested_name)
+                fallback_kind, fallback_color, fallback_is_data = fallback_color_for_name(
+                    f"{requested_name} {node.name} {getattr(node, 'label', '')} {material_obj.name}"
+                )
+                node.image = make_solid_image(
+                    f"missing_{fallback_kind}",
+                    fallback_color,
+                    is_data=fallback_is_data,
+                )
+                fallbacks += 1
                 continue
 
             image = load_texture_image_for_role(
@@ -2739,6 +2749,8 @@ def bind_extracted_textures(job):
         preview = ", ".join(sorted(missing)[:24])
         suffix = "..." if len(missing) > 24 else ""
         print(f"Texture bind missing {len(missing)}: {preview}{suffix}")
+    if fallbacks:
+        print(f"Missing texture neutral fallbacks applied: {fallbacks}")
     livery_links = bind_auto_livery_materials(texture_index, job, texture_manifest, role_images)
     generic_links = bind_generic_asset_texture(texture_index, texture_manifest, job, role_images)
     part_links = bind_untextured_materials(texture_index, texture_manifest, role_images)
@@ -2748,6 +2760,7 @@ def bind_extracted_textures(job):
     dump_wheel_materials()
     print(
         f"Texture bind matched: {matched}, missing: {len(missing)}, "
+        f"fallbacks: {fallbacks}, "
         f"livery_links: {livery_links}, generic_links: {generic_links}, part_links: {part_links}, "
         f"window_tunes: {window_tunes}, surface_tunes: {surface_tunes}, "
         f"paint_tones: {paint_tones}. "
@@ -3603,6 +3616,8 @@ def main():
 
     bind_extracted_textures(job)
     bake_sollumz_shader_parameters()
+    magenta_tunes = neutralize_magenta_materials()
+    print(f"Magenta material fallbacks neutralized: {magenta_tunes}")
     accessory_normal_tunes = tune_accessory_normal_maps()
     print(f"Accessory normal maps tuned: {accessory_normal_tunes}")
     overlay_tunes = tune_effect_overlay_materials()
